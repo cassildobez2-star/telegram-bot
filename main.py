@@ -1,10 +1,6 @@
 import logging
-from telegram import (
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    InputMediaPhoto,
-)
+import os
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -14,6 +10,7 @@ from telegram.ext import (
 
 from config import BOT_TOKEN
 from utils.loader import get_all_sources
+from utils.cbz import create_cbz
 
 logging.basicConfig(level=logging.INFO)
 
@@ -43,12 +40,13 @@ async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             results = await source.search(query)
 
-            for manga in results[:3]:  # limita 3 por fonte
-                title = manga.get("title") or manga.get("name")
-                url = manga.get("url") or manga.get("slug")
+            for manga in results[:3]:
+                title = manga.get("title")
+                slug = manga.get("slug")
+                url = manga.get("url")
 
-                if "slug" in manga:
-                    url = f"https://toonbr.com/manga/{manga['slug']}"
+                if slug:
+                    url = f"https://toonbr.com/manga/{slug}"
 
                 buttons.append([
                     InlineKeyboardButton(
@@ -57,17 +55,15 @@ async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                 ])
 
-        except Exception as e:
-            print(f"Erro na fonte {source_name}: {e}")
+        except Exception:
+            continue
 
     if not buttons:
         return await update.message.reply_text("Nenhum resultado encontrado.")
 
-    reply_markup = InlineKeyboardMarkup(buttons)
-
     await update.message.reply_text(
         f"Resultados para: {query}",
-        reply_markup=reply_markup
+        reply_markup=InlineKeyboardMarkup(buttons)
     )
 
 
@@ -78,7 +74,6 @@ async def manga_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     _, source_name, url = query.data.split("|", 2)
-
     source = get_all_sources()[source_name]
 
     try:
@@ -88,23 +83,24 @@ async def manga_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     buttons = []
 
-    for ch in chapters[:10]:
-        name = ch.get("name") or f"Cap {ch.get('chapter_number')}"
-        ch_url = ch.get("url") or ch.get("id")
+    for ch in chapters[:15]:
+        name = ch.get("name")
+        ch_url = ch.get("url")
 
-        if "id" in ch:
+        if ch.get("id"):
             ch_url = f"https://toonbr.com/read/{ch['id']}"
 
         buttons.append([
             InlineKeyboardButton(
                 name,
-                callback_data=f"chapter|{source_name}|{ch_url}"
+                callback_data=f"chapter|{source_name}|{ch_url}|{ch.get('manga_title','Manga')}|{name}"
             )
         ])
 
-    reply_markup = InlineKeyboardMarkup(buttons)
-
-    await query.edit_message_text("Capítulos:", reply_markup=reply_markup)
+    await query.edit_message_text(
+        "Selecione o capítulo:",
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
 
 
 # ================= CHAPTER =================
@@ -113,21 +109,29 @@ async def chapter_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    _, source_name, url = query.data.split("|", 2)
+    _, source_name, chapter_url, manga_title, chapter_name = query.data.split("|", 4)
 
     source = get_all_sources()[source_name]
 
+    status = await query.message.reply_text("📦 Gerando CBZ...")
+
     try:
-        images = await source.pages(url)
+        images = await source.pages(chapter_url)
     except Exception:
-        return await query.message.reply_text("Erro ao carregar páginas.")
+        return await status.edit_text("Erro ao carregar capítulo.")
 
     if not images:
-        return await query.message.reply_text("Capítulo vazio.")
+        return await status.edit_text("Capítulo vazio.")
 
-    media = [InputMediaPhoto(img) for img in images[:10]]
+    cbz_path, cbz_name = await create_cbz(images, manga_title, chapter_name)
 
-    await query.message.reply_media_group(media)
+    await query.message.reply_document(
+        document=open(cbz_path, "rb"),
+        filename=cbz_name
+    )
+
+    os.remove(cbz_path)
+    await status.delete()
 
 
 # ================= MAIN =================
