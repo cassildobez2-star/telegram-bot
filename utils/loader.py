@@ -2,9 +2,9 @@ from sources.toonbr import ToonBrSource
 from sources.mangaonline import MangaOnlineSource
 
 SOURCES = {
-    "toonbr": ToonBrSource(),
-    "mangaonline": MangaOnlineSource(),
+    "ToonBr": ToonBrSource(),
+    "MangaOnline": MangaOnlineSource(),
 }
 
-def get_source(name):
-    return SOURCES.get(name)
+def get_all_sources():
+    return SOURCES
