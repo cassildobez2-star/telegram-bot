@@ -61,7 +61,7 @@ async def manga_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     page = int(page_str)
     source = get_all_sources()[source_name]
 
-    chapters = await source.chapters(manga_url)
+    chapters = await source.chapters(manga_url)  # <- lista completa do mangá
     total = len(chapters)
     start = page * CHAPTERS_PER_PAGE
     end = start + CHAPTERS_PER_PAGE
@@ -72,8 +72,8 @@ async def manga_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chap_num = ch.get("chapter_number") or ch.get("name")
         buttons.append([
             InlineKeyboardButton(
-                str(chap_num),
-                callback_data=f"chapter|{source_name}|{ch.get('url')}"
+                f"Cap {chap_num}",
+                callback_data=f"chapter|{source_name}|{manga_url}|{ch.get('url')}"
             )
         ])
 
@@ -99,27 +99,28 @@ async def chapter_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    _, source_name, chapter_id = query.data.split("|")
+    _, source_name, manga_url, chapter_id = query.data.split("|")
     source = get_all_sources()[source_name]
 
-    # Pega info do capítulo
-    chapters = await source.chapters(chapter_id)
-    info = next((c for c in chapters if c.get("url") == chapter_id or c.get("id") == chapter_id), {})
-    chap_num = info.get("chapter_number") or info.get("name")
-    manga_title = info.get("manga_title","Manga")
+    chapters = await source.chapters(manga_url)  # <- lista completa do mangá
+    index = next((i for i,c in enumerate(chapters) if str(c.get("url")) == chapter_id or str(c.get("id")) == chapter_id), 0)
+    chapter = chapters[index]
+
+    chap_num = chapter.get("chapter_number") or chapter.get("name")
+    manga_title = chapter.get("manga_title","Manga")
 
     buttons = [
         [
-            InlineKeyboardButton("📥 Baixar este", callback_data=f"download|{source_name}|{chapter_id}|single"),
-            InlineKeyboardButton("📥 Baixar deste até o fim", callback_data=f"download|{source_name}|{chapter_id}|from_here")
+            InlineKeyboardButton("📥 Baixar este", callback_data=f"download|{source_name}|{manga_url}|{chapter_id}|single"),
+            InlineKeyboardButton("📥 Baixar deste até o fim", callback_data=f"download|{source_name}|{manga_url}|{chapter_id}|from_here")
         ],
         [
-            InlineKeyboardButton("📥 Baixar até Cap X", callback_data=f"download|{source_name}|{chapter_id}|to_here")
+            InlineKeyboardButton("📥 Baixar até Cap X", callback_data=f"download|{source_name}|{manga_url}|{chapter_id}|to_here")
         ]
     ]
 
     await query.edit_message_text(
-        f"📦 Cap {chap_num} — escolha o tipo de download:",
+        f"📦 {manga_title} — Cap {chap_num}\nEscolha o tipo de download:",
         reply_markup=InlineKeyboardMarkup(buttons)
     )
 
@@ -128,11 +129,11 @@ async def download_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    _, source_name, chapter_id, mode = query.data.split("|")
+    _, source_name, manga_url, chapter_id, mode = query.data.split("|")
     source = get_all_sources()[source_name]
 
-    chapters = await source.chapters(chapter_id)
-    index = next((i for i,c in enumerate(chapters) if c.get('url')==chapter_id or c.get('id')==chapter_id), 0)
+    chapters = await source.chapters(manga_url)  # <- lista completa do mangá
+    index = next((i for i,c in enumerate(chapters) if str(c.get("url"))==chapter_id or str(c.get("id"))==chapter_id), 0)
 
     if mode == "single":
         sel = [chapters[index]]
