@@ -1,5 +1,5 @@
-import logging
 import os
+import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
@@ -61,7 +61,7 @@ async def manga_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     page = int(page_str)
     source = get_all_sources()[source_name]
 
-    chapters = await source.chapters(manga_url)  # <- lista completa do mangá
+    chapters = await source.chapters(manga_url)
     total = len(chapters)
     start = page * CHAPTERS_PER_PAGE
     end = start + CHAPTERS_PER_PAGE
@@ -99,10 +99,12 @@ async def chapter_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
+    # recebemos manga_url e chapter_id
     _, source_name, manga_url, chapter_id = query.data.split("|")
     source = get_all_sources()[source_name]
 
-    chapters = await source.chapters(manga_url)  # <- lista completa do mangá
+    # lista completa de capítulos do mangá
+    chapters = await source.chapters(manga_url)
     index = next((i for i,c in enumerate(chapters) if str(c.get("url")) == chapter_id or str(c.get("id")) == chapter_id), 0)
     chapter = chapters[index]
 
@@ -132,14 +134,15 @@ async def download_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     _, source_name, manga_url, chapter_id, mode = query.data.split("|")
     source = get_all_sources()[source_name]
 
-    chapters = await source.chapters(manga_url)  # <- lista completa do mangá
+    # pega todos os capítulos do mangá
+    chapters = await source.chapters(manga_url)
     index = next((i for i,c in enumerate(chapters) if str(c.get("url"))==chapter_id or str(c.get("id"))==chapter_id), 0)
 
-    if mode == "single":
+    if mode=="single":
         sel = [chapters[index]]
-    elif mode == "from_here":
+    elif mode=="from_here":
         sel = chapters[index:]
-    elif mode == "to_here":
+    elif mode=="to_here":
         sel = chapters[:index+1]
     else:
         sel = [chapters[index]]
