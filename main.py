@@ -13,13 +13,11 @@ from utils.cbz import create_cbz
 
 logging.basicConfig(level=logging.INFO)
 
-
 # ================= START =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "📚 Manga Bot Online!\nUse: /buscar nome_do_manga"
     )
-
 
 # ================= BUSCAR =================
 async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -49,7 +47,6 @@ async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup(buttons)
     )
 
-
 # ================= MANGA =================
 async def manga_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -66,13 +63,12 @@ async def manga_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for ch in chapters[:20]:
         ch_id = ch.get("url") or ch.get("id")
         cap_number = ch.get("chapter_number") or ch.get("name")
-        buttons.append([InlineKeyboardButton(f"{cap_number}", callback_data=f"chapter|{source_name}|{ch_id}")])
+        buttons.append([InlineKeyboardButton(str(cap_number), callback_data=f"chapter|{source_name}|{ch_id}")])
 
     await query.edit_message_text(
-        "Selecione o capítulo:",
+        "Selecione o capítulo para baixar:",
         reply_markup=InlineKeyboardMarkup(buttons)
     )
-
 
 # ================= CHAPTER =================
 async def chapter_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -81,40 +77,77 @@ async def chapter_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     _, source_name, chapter_id = query.data.split("|", 2)
     source = get_all_sources()[source_name]
 
-    status = await query.message.reply_text("📦 Gerando CBZ...")
+    # Pega capítulo selecionado
+    chapters = await source.chapters(chapter_id)
+    chapter_info = next((ch for ch in chapters if ch.get("url") == chapter_id or ch.get("id") == chapter_id), None)
 
-    try:
-        # Buscar capítulo para pegar nome correto
-        chapters = await source.chapters(chapter_id)
-        chapter_info = next((ch for ch in chapters if ch.get("url") == chapter_id or ch.get("id") == chapter_id), None)
+    if chapter_info:
+        chapter_name = f"Cap {chapter_info.get('chapter_number', chapter_info.get('name',''))}"
+        manga_title = chapter_info.get("manga_title", "Manga")
+    else:
+        chapter_name = "Capítulo"
+        manga_title = "Manga"
 
-        if chapter_info:
-            chapter_name = chapter_info.get("name", "Capítulo")
-            manga_title = chapter_info.get("manga_title", "Manga")
-        else:
-            chapter_name = "Capítulo"
-            manga_title = "Manga"
+    # Botões de download
+    buttons = [
+        [
+            InlineKeyboardButton("📥 Baixar este", callback_data=f"download|{source_name}|{chapter_id}|single"),
+            InlineKeyboardButton("📥 Baixar deste até o fim", callback_data=f"download|{source_name}|{chapter_id}|from_here")
+        ],
+        [
+            InlineKeyboardButton("📥 Baixar até capítulo X", callback_data=f"download|{source_name}|{chapter_id}|to_here")
+        ]
+    ]
 
-        # Busca imagens
-        images = await source.pages(chapter_id)
-    except Exception:
-        return await status.edit_text("Erro ao carregar capítulo.")
-
-    if not images:
-        return await status.edit_text("Capítulo vazio.")
-
-    # Barra de progresso simples
-    total = len(images)
-    message = await status.edit_text(f"📦 Baixando 0/{total} páginas...")
-    cbz_path, cbz_name = await create_cbz(images, manga_title, chapter_name, progress_message=message)
-
-    await query.message.reply_document(
-        document=open(cbz_path, "rb"),
-        filename=cbz_name
+    await query.edit_message_text(
+        f"Selecione opção de download para {chapter_name}:",
+        reply_markup=InlineKeyboardMarkup(buttons)
     )
 
-    os.remove(cbz_path)
-    await message.delete()
+# ================= DOWNLOAD CALLBACK =================
+async def download_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    _, source_name, chapter_id, mode = query.data.split("|", 3)
+    source = get_all_sources()[source_name]
+
+    chapters = await source.chapters(chapter_id)
+    chapter_index = next((i for i, ch in enumerate(chapters) if ch.get("url") == chapter_id or ch.get("id") == chapter_id), 0)
+
+    if mode == "single":
+        selected_chapters = [chapters[chapter_index]]
+    elif mode == "from_here":
+        selected_chapters = chapters[chapter_index:]
+    elif mode == "to_here":
+        selected_chapters = chapters[:chapter_index+1]
+    else:
+        selected_chapters = [chapters[chapter_index]]
+
+    status = await query.message.reply_text(f"📦 Gerando CBZ(s) para {len(selected_chapters)} capítulo(s)...")
+
+    for ch in selected_chapters:
+        ch_id = ch.get("url") or ch.get("id")
+        chapter_name = f"Cap {ch.get('chapter_number', ch.get('name',''))}"
+        manga_title = ch.get("manga_title", "Manga")
+
+        try:
+            images = await source.pages(ch_id)
+        except Exception:
+            await query.message.reply_text(f"❌ Falha ao baixar {chapter_name}")
+            continue
+
+        if not images:
+            await query.message.reply_text(f"❌ {chapter_name} vazio")
+            continue
+
+        cbz_path, cbz_name = await create_cbz(images, manga_title, chapter_name)
+        await query.message.reply_document(
+            document=open(cbz_path, "rb"),
+            filename=cbz_name
+        )
+        os.remove(cbz_path)
+
+    await status.delete()
 
 
 # ================= MAIN =================
@@ -124,6 +157,7 @@ def main():
     app.add_handler(CommandHandler("buscar", buscar))
     app.add_handler(CallbackQueryHandler(manga_callback, pattern="^manga"))
     app.add_handler(CallbackQueryHandler(chapter_callback, pattern="^chapter"))
+    app.add_handler(CallbackQueryHandler(download_callback, pattern="^download"))
     app.run_polling(drop_pending_updates=True)
 
 
