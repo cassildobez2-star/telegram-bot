@@ -4,7 +4,6 @@ import time
 from utils.downloader import download_images
 
 async def create_cbz(image_urls, manga_title, chapter_name):
-    # Baixa imagens de verdade
     images_data = await download_images(image_urls)
     if not images_data:
         raise ValueError("Nenhuma imagem foi baixada")
