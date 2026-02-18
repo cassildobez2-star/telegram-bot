@@ -1,22 +1,28 @@
 import zipfile
 import os
-import time
-from utils.downloader import download_images
+import httpx
+import asyncio
+
+async def download_image(client, url, path):
+    r = await client.get(url)
+    r.raise_for_status()
+    with open(path, "wb") as f:
+        f.write(r.content)
 
 async def create_cbz(image_urls, manga_title, chapter_name):
-    images_data = await download_images(image_urls)
-    if not images_data:
-        raise ValueError("❌ Nenhuma imagem foi baixada. Cap bloqueado ou inválido.")
+    os.makedirs("tmp", exist_ok=True)
+    paths = [f"tmp/{i}.jpg" for i in range(len(image_urls))]
 
-    safe_title = "".join(c for c in manga_title if c.isalnum() or c in " _-")
-    safe_chap = "".join(c for c in chapter_name if c.isalnum() or c in " _-")
-    filename = f"{safe_title}_{safe_chap}.cbz"
-    tmp_path = f"/tmp/{int(time.time()*1000)}_{filename}"
+    async with httpx.AsyncClient(timeout=60) as client:
+        tasks = [download_image(client, url, path) for url, path in zip(image_urls, paths)]
+        await asyncio.gather(*tasks)
 
-    with zipfile.ZipFile(tmp_path, "w") as zf:
-        for idx, img_bytes in enumerate(images_data, 1):
-            img_name = f"{idx:03}.jpg"
-            zf.writestr(img_name, img_bytes)
+    cbz_name = f"{manga_title} - {chapter_name}.cbz"
+    cbz_path = f"tmp/{cbz_name}"
 
-    print(f"✅ CBZ criado: {tmp_path} ({len(images_data)} imagens)")
-    return tmp_path, filename
+    with zipfile.ZipFile(cbz_path, "w") as cbz:
+        for path in paths:
+            cbz.write(path, os.path.basename(path))
+            os.remove(path)
+
+    return cbz_path, cbz_name
