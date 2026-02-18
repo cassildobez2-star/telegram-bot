@@ -10,12 +10,7 @@ async def fetch_image(client, url):
         return None
 
 async def download_images(urls):
-    """
-    Recebe lista de URLs, retorna lista de bytes de cada imagem
-    """
-    results = []
     async with httpx.AsyncClient(http2=True, timeout=30.0) as client:
         tasks = [fetch_image(client, url) for url in urls]
-        fetched = await asyncio.gather(*tasks)
-        results = [img for img in fetched if img]
-    return results
+        results = await asyncio.gather(*tasks)
+        return [img for img in results if img]
