@@ -1,6 +1,7 @@
 import httpx
+import asyncio
 
-class ToonBr:
+class ToonBrSource:
     name = "ToonBr"
     base_url = "https://beta.toonbr.com"
     api_url = "https://api.toonbr.com"
@@ -8,10 +9,14 @@ class ToonBr:
 
     async def search(self, query: str):
         url = f"{self.api_url}/api/manga?page=1&limit=20&search={query}"
-        async with httpx.AsyncClient(timeout=30) as client:
-            r = await client.get(url)
-            r.raise_for_status()
-            data = r.json()
+        async with httpx.AsyncClient(timeout=60) as client:
+            try:
+                r = await client.get(url)
+                r.raise_for_status()
+                data = r.json()
+            except Exception:
+                return []
+
         results = []
         for manga in data.get("data", []):
             results.append({
@@ -22,13 +27,16 @@ class ToonBr:
 
     async def chapters(self, manga_slug: str):
         url = f"{self.api_url}/api/manga/{manga_slug}"
-        async with httpx.AsyncClient(timeout=30) as client:
-            r = await client.get(url)
-            r.raise_for_status()
-            data = r.json()
+        async with httpx.AsyncClient(timeout=60) as client:
+            try:
+                r = await client.get(url)
+                r.raise_for_status()
+                data = r.json()
+            except Exception:
+                return []
 
-        manga_title = data.get("title", "Manga")
         chapters = []
+        manga_title = data.get("title", "Manga")
         for ch in data.get("chapters", []):
             chapters.append({
                 "name": ch.get("name"),
@@ -42,11 +50,13 @@ class ToonBr:
 
     async def pages(self, chapter_id: str):
         url = f"{self.api_url}/api/chapter/{chapter_id}"
-        headers = {"User-Agent": "Mozilla/5.0", "Referer": self.base_url}
-        async with httpx.AsyncClient(timeout=60, headers=headers) as client:
-            r = await client.get(url)
-            r.raise_for_status()
-            data = r.json()
+        async with httpx.AsyncClient(timeout=60) as client:
+            try:
+                r = await client.get(url)
+                r.raise_for_status()
+                data = r.json()
+            except Exception:
+                return []
 
         pages = []
         for p in data.get("pages", []):
