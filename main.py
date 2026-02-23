@@ -299,11 +299,13 @@ def main():
     app.add_handler(CallbackQueryHandler(chapter_callback, pattern="^c\\|"))
     app.add_handler(CallbackQueryHandler(download_callback, pattern="^d\\|"))
 
-    # Inicia worker corretamente
-    app.create_task(download_worker())
+    async def start_worker(app):
+        app.create_task(download_worker())
+        print("🚀 Worker iniciado")
+
+    app.post_init = start_worker
 
     app.run_polling(drop_pending_updates=True)
-
 
 if __name__ == "__main__":
     main()
