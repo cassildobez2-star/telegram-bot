@@ -1,10 +1,12 @@
 from sources.toonbr import ToonBrSource
 from sources.mangaflix import MangaFlixSource
+from sources.mangalivreblog import MangaLivreBlogSource
 
 # Dicionário de fontes disponíveis
 _sources = {
     "ToonBr": ToonBrSource(),
-    "MangaFlix": MangaFlixSource()
+    "MangaFlix": MangaFlixSource() 
+    "MangaLivreBlog": MangaLivreBlogSource()
 }
 
 def get_all_sources():
