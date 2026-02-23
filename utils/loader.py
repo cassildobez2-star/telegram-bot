@@ -5,7 +5,7 @@ from sources.mangalivreblog import MangaLivreBlogSource
 # Dicionário de fontes disponíveis
 _sources = {
     "ToonBr": ToonBrSource(),
-    "MangaFlix": MangaFlixSource() 
+    "MangaFlix": MangaFlixSource(),
     "MangaLivreBlog": MangaLivreBlogSource()
 }
 
