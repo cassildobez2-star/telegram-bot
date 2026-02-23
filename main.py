@@ -18,7 +18,7 @@ from utils.cbz import create_cbz
 
 logging.basicConfig(level=logging.INFO)
 
-CHAPTERS_PER_PAGE = 10
+RESULTS_PER_PAGE = 10
 
 # ================= FILA GLOBAL =================
 DOWNLOAD_QUEUE = asyncio.Queue()
@@ -77,48 +77,94 @@ async def fila(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if block_private(update):
         return
-
     if not context.args:
         return await update.effective_message.reply_text("Use:\n/buscar nome_do_manga")
 
     query_text = " ".join(context.args)
     sources = get_all_sources()
-    all_buttons = []
+    user_id = update.effective_user.id
+    session = get_session(user_id)
+
+    session["search_results"] = {}  # {source_name: [manga1, manga2,...]}
+    session["search_pages"] = {}    # {source_name: 0}
 
     for source_name, source in sources.items():
         try:
             results = await source.search(query_text)
-            for manga in results[:3]:  # limitar a 3 resultados por fonte
-                all_buttons.append([
-                    InlineKeyboardButton(
-                        f"{manga.get('title')} ({source_name})",
-                        callback_data=f"m|{source_name}|{manga.get('url')}|0",
-                    )
-                ])
+            if results:
+                session["search_results"][source_name] = results
+                session["search_pages"][source_name] = 0
         except Exception:
             traceback.print_exc()
             continue
 
-    if not all_buttons:
+    if not session["search_results"]:
         return await update.effective_message.reply_text("❌ Nenhum resultado encontrado.")
 
-    msg = await update.effective_message.reply_text(
-        f"🔎 Resultados para: {query_text}",
-        reply_markup=InlineKeyboardMarkup(all_buttons),
+    first_source = list(session["search_results"].keys())[0]
+    await mostrar_resultados_page(update, first_source)
+
+
+# ================= MOSTRAR RESULTADOS =================
+async def mostrar_resultados_page(update_or_query, source_name):
+    """Mostra uma página de resultados para uma fonte específica"""
+    if isinstance(update_or_query, Update):
+        user_id = update_or_query.effective_user.id
+        session = get_session(user_id)
+        reply_func = update_or_query.effective_message.reply_text
+    else:
+        query = update_or_query
+        user_id = query.from_user.id
+        session = get_session(user_id)
+        reply_func = lambda text, reply_markup=None: query.edit_message_text(
+            text=text, reply_markup=reply_markup
+        )
+
+    results = session["search_results"][source_name]
+    page = session["search_pages"][source_name]
+    start = page * RESULTS_PER_PAGE
+    end = start + RESULTS_PER_PAGE
+    subset = results[start:end]
+
+    buttons = []
+    for manga in subset:
+        buttons.append([
+            InlineKeyboardButton(
+                f"{manga.get('title')} ({source_name})",
+                callback_data=f"m|{source_name}|{manga.get('url')}|0",
+            )
+        ])
+
+    nav = []
+    if start > 0:
+        nav.append(InlineKeyboardButton("«", callback_data=f"search|{source_name}|{page-1}"))
+    if end < len(results):
+        nav.append(InlineKeyboardButton("»", callback_data=f"search|{source_name}|{page+1}"))
+    if nav:
+        buttons.append(nav)
+
+    await reply_func(
+        f"🔎 Resultados da fonte: {source_name} (Página {page+1}/{(len(results)-1)//RESULTS_PER_PAGE+1})",
+        reply_markup=InlineKeyboardMarkup(buttons),
     )
 
-    session = get_session(update.effective_user.id)
-    session["last_message_id"] = msg.message_id
 
-
-# ================= LISTAR CAPÍTULOS =================
-async def manga_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if block_private(update):
-        return
-
+# ================= CALLBACKS =================
+async def search_navigation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    _, source_name, page_str = query.data.split("|")
+    page = int(page_str)
+    user_id = query.from_user.id
+    session = get_session(user_id)
+    if source_name in session.get("search_pages", {}):
+        session["search_pages"][source_name] = page
+        await mostrar_resultados_page(query, source_name)
 
+
+async def manga_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
     user_id = query.from_user.id
     session = get_session(user_id)
 
@@ -136,8 +182,8 @@ async def manga_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     })
 
     total = len(chapters)
-    start = page * CHAPTERS_PER_PAGE
-    end = start + CHAPTERS_PER_PAGE
+    start = page * RESULTS_PER_PAGE
+    end = start + RESULTS_PER_PAGE
     subset = chapters[start:end]
 
     buttons = []
@@ -159,14 +205,9 @@ async def manga_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-# ================= OPÇÕES =================
 async def chapter_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if block_private(update):
-        return
-
     query = update.callback_query
     await query.answer()
-
     user_id = query.from_user.id
     session = get_session(user_id)
 
@@ -185,11 +226,9 @@ async def chapter_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-# ================= DOWNLOAD CALLBACK =================
 async def download_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-
     user_id = query.from_user.id
     session = get_session(user_id)
 
@@ -221,12 +260,10 @@ async def download_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         })
 
     await query.message.reply_text(
-        f"✅ {len(selected)} capítulo(s) adicionados à fila.\n"
-        f"📦 Posição atual na fila: {DOWNLOAD_QUEUE.qsize()}"
+        f"✅ {len(selected)} capítulo(s) adicionados à fila.\n📦 Posição atual na fila: {DOWNLOAD_QUEUE.qsize()}"
     )
 
 
-# ================= INPUT DE CAPÍTULO =================
 async def input_cap_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
     user_id = msg.from_user.id
@@ -262,8 +299,7 @@ async def input_cap_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         })
 
     await msg.reply_text(
-        f"✅ {len(selected)} capítulo(s) adicionados à fila.\n"
-        f"📦 Posição atual na fila: {DOWNLOAD_QUEUE.qsize()}"
+        f"✅ {len(selected)} capítulo(s) adicionados à fila.\n📦 Posição atual na fila: {DOWNLOAD_QUEUE.qsize()}"
     )
 
 
@@ -304,6 +340,7 @@ def main():
     app.add_handler(CommandHandler("fila", fila))
 
     # callbacks
+    app.add_handler(CallbackQueryHandler(search_navigation_callback, pattern="^search\\|"))
     app.add_handler(CallbackQueryHandler(manga_callback, pattern="^m\\|"))
     app.add_handler(CallbackQueryHandler(chapter_callback, pattern="^c\\|"))
     app.add_handler(CallbackQueryHandler(download_callback, pattern="^d\\|"))
