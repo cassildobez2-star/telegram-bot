@@ -88,7 +88,7 @@ async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for source_name, source in sources.items():
         try:
             results = await source.search(query_text)
-            for manga in results[:3]:  # limitar a 3 resultados por fonte
+            for manga in results[:5]:  # limitar a 3 resultados por fonte
                 all_buttons.append([
                     InlineKeyboardButton(
                         f"{manga.get('title')} ({source_name})",
