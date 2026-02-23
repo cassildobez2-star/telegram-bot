@@ -1,5 +1,6 @@
 import os
 import logging
+import asyncio
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -20,6 +21,22 @@ logging.basicConfig(level=logging.INFO)
 CHAPTERS_PER_PAGE = 10
 WAITING_FOR_CAP = 1
 
+# ================= FILA GLOBAL =================
+DOWNLOAD_QUEUE = asyncio.Queue()
+
+
+# ================= WORKER =================
+async def download_worker():
+    while True:
+        message, source, chapter = await DOWNLOAD_QUEUE.get()
+
+        try:
+            await send_chapter(message, source, chapter)
+        except Exception as e:
+            print("Erro no worker:", e)
+
+        DOWNLOAD_QUEUE.task_done()
+
 
 # ================= SESSIONS =================
 def get_sessions(context):
@@ -36,7 +53,7 @@ def block_private(update: Update):
     return update.effective_chat.type == "private"
 
 
-# ======= DONO DA SESSÃO =======
+# ================= OWNER CHECK =================
 async def ensure_owner(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     session = get_session(context, query.message.message_id)
@@ -54,8 +71,25 @@ async def ensure_owner(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ================= START =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if block_private(update):
-        return await update.effective_message.reply_text("❌ Bot criado especialmente para o grupo @animesmangas308! Bot criado por @shadow404c.")
-    await update.effective_message.reply_text("📚 Manga Bot Online!\nUse:\n/buscar nome_do_manga")
+        return await update.effective_message.reply_text(
+            "❌ Bot criado especialmente para o grupo @animesmangas308!"
+        )
+
+    await update.effective_message.reply_text(
+        "📚 Manga Bot Online!\nUse:\n/buscar nome_do_manga"
+    )
+
+
+# ================= FILA COMMAND =================
+async def fila(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if block_private(update):
+        return
+
+    total = DOWNLOAD_QUEUE.qsize()
+
+    await update.effective_message.reply_text(
+        f"📦 {total} capítulo(s) na fila."
+    )
 
 
 # ================= BUSCAR =================
@@ -64,7 +98,9 @@ async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if not context.args:
-        return await update.effective_message.reply_text("Use:\n/buscar nome_do_manga")
+        return await update.effective_message.reply_text(
+            "Use:\n/buscar nome_do_manga"
+        )
 
     query_text = " ".join(context.args)
     sources = get_all_sources()
@@ -76,14 +112,20 @@ async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for manga in results[:6]:
                 title = manga.get("title")
                 url = manga.get("url")
+
                 buttons.append([
-                    InlineKeyboardButton(f"{title} ({source_name})", callback_data=f"m|{source_name}|{url}|0")
+                    InlineKeyboardButton(
+                        f"{title} ({source_name})",
+                        callback_data=f"m|{source_name}|{url}|0",
+                    )
                 ])
         except Exception:
             continue
 
     if not buttons:
-        return await update.effective_message.reply_text("❌ Nenhum resultado encontrado.")
+        return await update.effective_message.reply_text(
+            "❌ Nenhum resultado encontrado."
+        )
 
     msg = await update.effective_message.reply_text(
         f"🔎 Resultados para: {query_text}",
@@ -92,7 +134,6 @@ async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     session = get_session(context, msg.message_id)
     session["owner_id"] = update.effective_user.id
-    session["owner_name"] = update.effective_user.first_name
 
 
 # ================= LISTAR CAPÍTULOS =================
@@ -122,22 +163,32 @@ async def manga_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     subset = chapters[start:end]
 
     buttons = []
+
     for i, ch in enumerate(subset, start=start):
         num = ch.get("chapter_number") or ch.get("name")
-        buttons.append([InlineKeyboardButton(f"Cap {num}", callback_data=f"c|{i}")])
+        buttons.append([
+            InlineKeyboardButton(f"Cap {num}", callback_data=f"c|{i}")
+        ])
 
     nav = []
     if start > 0:
-        nav.append(InlineKeyboardButton("«", callback_data=f"m|{source_name}|{manga_id}|{page-1}"))
+        nav.append(
+            InlineKeyboardButton("«", callback_data=f"m|{source_name}|{manga_id}|{page-1}")
+        )
     if end < total:
-        nav.append(InlineKeyboardButton("»", callback_data=f"m|{source_name}|{manga_id}|{page+1}"))
+        nav.append(
+            InlineKeyboardButton("»", callback_data=f"m|{source_name}|{manga_id}|{page+1}")
+        )
     if nav:
         buttons.append(nav)
 
-    await query.edit_message_text("📖 Selecione o capítulo:", reply_markup=InlineKeyboardMarkup(buttons))
+    await query.edit_message_text(
+        "📖 Selecione o capítulo:",
+        reply_markup=InlineKeyboardMarkup(buttons),
+    )
 
 
-# ================= OPÇÕES DE DOWNLOAD =================
+# ================= OPÇÕES =================
 async def chapter_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if block_private(update):
         return
@@ -159,7 +210,10 @@ async def chapter_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("📥 Baixar até cap X", callback_data="input_cap")],
     ]
 
-    await query.edit_message_text("Escolha o tipo de download:", reply_markup=InlineKeyboardMarkup(buttons))
+    await query.edit_message_text(
+        "Escolha o tipo de download:",
+        reply_markup=InlineKeyboardMarkup(buttons),
+    )
 
 
 # ================= DOWNLOAD =================
@@ -192,12 +246,15 @@ async def download_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         selected = []
 
-    status = await query.message.reply_text(f"📦 Gerando {len(selected)} capítulo(s)...")
-
     for chapter in selected:
-        await send_chapter(query.message, get_all_sources()[source_name], chapter)
+        await DOWNLOAD_QUEUE.put(
+            (query.message, get_all_sources()[source_name], chapter)
+        )
 
-    await status.delete()
+    await query.message.reply_text(
+        f"✅ {len(selected)} capítulo(s) adicionados à fila.\n"
+        f"📦 Posição atual: {DOWNLOAD_QUEUE.qsize()}"
+    )
 
 
 # ================= CAP X =================
@@ -208,11 +265,10 @@ async def input_cap_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     query = update.callback_query
     await query.answer()
 
-    session = await ensure_owner(update, context)
-    if not session:
-        return
+    await query.message.reply_text(
+        "Digite o número do capítulo até onde deseja baixar:"
+    )
 
-    await query.message.reply_text("Digite o número do capítulo até onde deseja baixar:")
     return WAITING_FOR_CAP
 
 
@@ -220,33 +276,39 @@ async def receive_cap_number(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if block_private(update):
         return ConversationHandler.END
 
-    reply = update.message.reply_to_message
-    if not reply:
-        return ConversationHandler.END
-
-    session = get_session(context, reply.message_id)
-
-    if update.effective_user.id != session.get("owner_id"):
-        await update.message.reply_text("❌ Você não iniciou este pedido.")
-        return ConversationHandler.END
-
     cap_text = update.message.text.strip()
+
     if not cap_text.replace(".", "", 1).isdigit():
         await update.message.reply_text("Digite um número válido.")
         return WAITING_FOR_CAP
 
     cap_number = float(cap_text)
+
+    # recupera última sessão ativa
+    sessions = context.chat_data.get("sessions", {})
+    if not sessions:
+        return ConversationHandler.END
+
+    session = list(sessions.values())[-1]
+
     chapters = session.get("chapters")
     source_name = session.get("source_name")
 
-    selected = [c for c in chapters if float(c.get("chapter_number") or 0) <= cap_number]
-
-    status = await update.message.reply_text(f"📦 Gerando {len(selected)} capítulo(s)...")
+    selected = [
+        c for c in chapters
+        if float(c.get("chapter_number") or 0) <= cap_number
+    ]
 
     for chapter in selected:
-        await send_chapter(update.message, get_all_sources()[source_name], chapter)
+        await DOWNLOAD_QUEUE.put(
+            (update.message, get_all_sources()[source_name], chapter)
+        )
 
-    await status.delete()
+    await update.message.reply_text(
+        f"✅ {len(selected)} capítulo(s) adicionados à fila.\n"
+        f"📦 Posição atual: {DOWNLOAD_QUEUE.qsize()}"
+    )
+
     return ConversationHandler.END
 
 
@@ -260,18 +322,30 @@ async def send_chapter(message, source, chapter):
     if not imgs:
         return
 
-    cbz_path, cbz_name = await create_cbz(imgs, manga_title, f"Cap_{num}")
+    cbz_buffer, cbz_name = await create_cbz(
+        imgs,
+        manga_title,
+        f"Cap_{num}"
+    )
 
-    await message.reply_document(document=open(cbz_path, "rb"), filename=cbz_name)
-    os.remove(cbz_path)
+    await message.reply_document(
+        document=cbz_buffer,
+        filename=cbz_name,
+    )
 
 
 # ================= MAIN =================
 def main():
     app = ApplicationBuilder().token(os.getenv("BOT_TOKEN")).build()
 
-    app.add_handler(CommandHandler("start1", start))
+    async def post_init(application):
+        application.create_task(download_worker())
+
+    app.post_init = post_init
+
+    app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("buscar", buscar))
+    app.add_handler(CommandHandler("fila", fila))
 
     app.add_handler(CallbackQueryHandler(manga_callback, pattern="^m\\|"))
     app.add_handler(CallbackQueryHandler(chapter_callback, pattern="^c\\|"))
@@ -279,13 +353,17 @@ def main():
 
     conv_handler = ConversationHandler(
         entry_points=[CallbackQueryHandler(input_cap_callback, pattern="^input_cap$")],
-        states={WAITING_FOR_CAP: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_cap_number)]},
+        states={
+            WAITING_FOR_CAP: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_cap_number)
+            ]
+        },
         fallbacks=[],
     )
 
     app.add_handler(conv_handler)
 
-    app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
+    app.run_polling(drop_pending_updates=True)
 
 
 if __name__ == "__main__":
