@@ -9,7 +9,6 @@ from telegram.ext import (
     CommandHandler,
     CallbackQueryHandler,
     ContextTypes,
-    ConversationHandler,
     MessageHandler,
     filters,
 )
@@ -20,7 +19,6 @@ from utils.cbz import create_cbz
 logging.basicConfig(level=logging.INFO)
 
 CHAPTERS_PER_PAGE = 10
-WAITING_FOR_CAP = 1
 
 # ================= FILA GLOBAL =================
 DOWNLOAD_QUEUE = asyncio.Queue()
@@ -29,16 +27,13 @@ DOWNLOAD_QUEUE = asyncio.Queue()
 # ================= WORKER =================
 async def download_worker():
     print("🚀 Worker iniciado")
-
     while True:
         message, source, chapter = await DOWNLOAD_QUEUE.get()
-
         try:
             await send_chapter(message, source, chapter)
         except Exception:
             print("❌ Erro no worker:")
             traceback.print_exc()
-
         DOWNLOAD_QUEUE.task_done()
 
 
@@ -88,9 +83,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def fila(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if block_private(update):
         return
-
     total = DOWNLOAD_QUEUE.qsize()
-
     await update.effective_message.reply_text(
         f"📦 {total} capítulo(s) na fila."
     )
@@ -108,14 +101,13 @@ async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     query_text = " ".join(context.args)
     sources = get_all_sources()
-    buttons = []
+    all_buttons = []
 
     for source_name, source in sources.items():
         try:
             results = await source.search(query_text)
-
-            for manga in results[:6]:
-                buttons.append([
+            for manga in results[:3]:  # limitar a 3 resultados por fonte
+                all_buttons.append([
                     InlineKeyboardButton(
                         f"{manga.get('title')} ({source_name})",
                         callback_data=f"m|{source_name}|{manga.get('url')}|0",
@@ -125,14 +117,12 @@ async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
             traceback.print_exc()
             continue
 
-    if not buttons:
-        return await update.effective_message.reply_text(
-            "❌ Nenhum resultado encontrado."
-        )
+    if not all_buttons:
+        return await update.effective_message.reply_text("❌ Nenhum resultado encontrado.")
 
     msg = await update.effective_message.reply_text(
         f"🔎 Resultados para: {query_text}",
-        reply_markup=InlineKeyboardMarkup(buttons),
+        reply_markup=InlineKeyboardMarkup(all_buttons),
     )
 
     session = get_session(context, msg.message_id)
@@ -166,22 +156,15 @@ async def manga_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     subset = chapters[start:end]
 
     buttons = []
-
     for i, ch in enumerate(subset, start=start):
         num = ch.get("chapter_number") or ch.get("name")
-        buttons.append([
-            InlineKeyboardButton(f"Cap {num}", callback_data=f"c|{i}")
-        ])
+        buttons.append([InlineKeyboardButton(f"Cap {num}", callback_data=f"c|{i}")])
 
     nav = []
     if start > 0:
-        nav.append(
-            InlineKeyboardButton("«", callback_data=f"m|{source_name}|{manga_id}|{page-1}")
-        )
+        nav.append(InlineKeyboardButton("«", callback_data=f"m|{source_name}|{manga_id}|{page-1}"))
     if end < total:
-        nav.append(
-            InlineKeyboardButton("»", callback_data=f"m|{source_name}|{manga_id}|{page+1}")
-        )
+        nav.append(InlineKeyboardButton("»", callback_data=f"m|{source_name}|{manga_id}|{page+1}"))
     if nav:
         buttons.append(nav)
 
@@ -207,10 +190,9 @@ async def chapter_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     session["selected_index"] = int(index_str)
 
     buttons = [
-        [InlineKeyboardButton("📥 Baixar este", callback_data="d|single")],
-        [InlineKeyboardButton("📥 Baixar deste até o fim", callback_data="d|from")],
-        [InlineKeyboardButton("📥 Baixar até aqui", callback_data="d|to")],
-        [InlineKeyboardButton("📥 Baixar até cap X", callback_data="input_cap")],
+        [InlineKeyboardButton("🔻 Baixar este", callback_data="d|single")],
+        [InlineKeyboardButton("✅ Baixar todos", callback_data="d|all")],
+        [InlineKeyboardButton("📝 Baixar até capítulo", callback_data="input_cap")],
     ]
 
     await query.edit_message_text(
@@ -242,12 +224,13 @@ async def download_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if mode == "single":
         selected = [chapters[index]]
-    elif mode == "from":
+    elif mode == "all":
         selected = chapters[index:]
-    elif mode == "to":
-        selected = chapters[: index + 1]
     else:
-        selected = []
+        # input_cap será tratado pelo handler de mensagem
+        return await query.message.reply_text(
+            "Digite o número do capítulo até onde deseja baixar:",
+        )
 
     for chapter in selected:
         await DOWNLOAD_QUEUE.put(
@@ -255,6 +238,48 @@ async def download_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     await query.message.reply_text(
+        f"✅ {len(selected)} capítulo(s) adicionados à fila.\n"
+        f"📦 Posição atual: {DOWNLOAD_QUEUE.qsize()}"
+    )
+
+
+# ================= INPUT DE CAPÍTULO =================
+async def input_cap_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if block_private(update):
+        return
+
+    msg = update.effective_message
+    # Assume que a mensagem original do menu de capítulos está respondida
+    if not msg.reply_to_message:
+        return
+
+    session = get_session(context, msg.reply_to_message.message_id)
+    if not session or "chapters" not in session or "selected_index" not in session:
+        return await msg.reply_text("Sessão expirada ou inválida.")
+
+    try:
+        target = float(msg.text)
+    except ValueError:
+        return await msg.reply_text("Digite apenas o número do capítulo.")
+
+    chapters = session["chapters"]
+    selected_index = session["selected_index"]
+
+    # Seleciona capítulos até o número informado
+    selected = []
+    for ch in chapters[selected_index:]:
+        ch_num = ch.get("chapter_number")
+        if float(ch_num) <= target:
+            selected.append(ch)
+        else:
+            break
+
+    for chapter in selected:
+        await DOWNLOAD_QUEUE.put(
+            (msg, get_all_sources()[session["source_name"]], chapter)
+        )
+
+    await msg.reply_text(
         f"✅ {len(selected)} capítulo(s) adicionados à fila.\n"
         f"📦 Posição atual: {DOWNLOAD_QUEUE.qsize()}"
     )
@@ -299,13 +324,16 @@ def main():
     app.add_handler(CallbackQueryHandler(chapter_callback, pattern="^c\\|"))
     app.add_handler(CallbackQueryHandler(download_callback, pattern="^d\\|"))
 
+    # Handler para capturar número do capítulo
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, input_cap_handler))
+
     async def start_worker(app):
         app.create_task(download_worker())
         print("🚀 Worker iniciado")
 
     app.post_init = start_worker
-
     app.run_polling(drop_pending_updates=True)
+
 
 if __name__ == "__main__":
     main()
