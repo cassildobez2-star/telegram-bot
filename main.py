@@ -22,49 +22,36 @@ CHAPTERS_PER_PAGE = 10
 
 # ================= FILA GLOBAL =================
 DOWNLOAD_QUEUE = asyncio.Queue()
+USER_SESSIONS = {}  # {user_id: session}
 
 
 # ================= WORKER =================
 async def download_worker():
     print("🚀 Worker iniciado")
     while True:
-        message, source, chapter = await DOWNLOAD_QUEUE.get()
+        item = await DOWNLOAD_QUEUE.get()
+        chapter = item["chapter"]
+        source = item["source"]
+        message = item["message"]
+
         try:
             await send_chapter(message, source, chapter)
         except Exception:
-            print("❌ Erro no worker:")
+            print("❌ Erro ao baixar capítulo:")
             traceback.print_exc()
-        DOWNLOAD_QUEUE.task_done()
+        finally:
+            DOWNLOAD_QUEUE.task_done()
 
 
 # ================= SESSIONS =================
-def get_sessions(context):
-    if "sessions" not in context.chat_data:
-        context.chat_data["sessions"] = {}
-    return context.chat_data["sessions"]
-
-
-def get_session(context, message_id):
-    return get_sessions(context).setdefault(str(message_id), {})
-
-
 def block_private(update: Update):
     return update.effective_chat.type == "private"
 
 
-# ================= OWNER CHECK =================
-async def ensure_owner(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    session = get_session(context, query.message.message_id)
-
-    user_id = query.from_user.id
-    owner_id = session.get("owner_id")
-
-    if owner_id and user_id != owner_id:
-        await query.answer("❌ Este pedido pertence a outro usuário.", show_alert=True)
-        return None
-
-    return session
+def get_session(user_id):
+    if user_id not in USER_SESSIONS:
+        USER_SESSIONS[user_id] = {}
+    return USER_SESSIONS[user_id]
 
 
 # ================= START =================
@@ -73,7 +60,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await update.effective_message.reply_text(
             "❌ Bot criado especialmente para o grupo @animesmangas308!"
         )
-
     await update.effective_message.reply_text(
         "📚 Manga Bot Online!\nUse:\n/buscar nome_do_manga"
     )
@@ -84,9 +70,7 @@ async def fila(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if block_private(update):
         return
     total = DOWNLOAD_QUEUE.qsize()
-    await update.effective_message.reply_text(
-        f"📦 {total} capítulo(s) na fila."
-    )
+    await update.effective_message.reply_text(f"📦 {total} capítulo(s) na fila.")
 
 
 # ================= BUSCAR =================
@@ -95,9 +79,7 @@ async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if not context.args:
-        return await update.effective_message.reply_text(
-            "Use:\n/buscar nome_do_manga"
-        )
+        return await update.effective_message.reply_text("Use:\n/buscar nome_do_manga")
 
     query_text = " ".join(context.args)
     sources = get_all_sources()
@@ -125,8 +107,8 @@ async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup(all_buttons),
     )
 
-    session = get_session(context, msg.message_id)
-    session["owner_id"] = update.effective_user.id
+    session = get_session(update.effective_user.id)
+    session["last_message_id"] = msg.message_id
 
 
 # ================= LISTAR CAPÍTULOS =================
@@ -137,9 +119,8 @@ async def manga_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    session = await ensure_owner(update, context)
-    if not session:
-        return
+    user_id = query.from_user.id
+    session = get_session(user_id)
 
     _, source_name, manga_id, page_str = query.data.split("|")
     page = int(page_str)
@@ -147,8 +128,12 @@ async def manga_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     source = get_all_sources()[source_name]
     chapters = await source.chapters(manga_id)
 
-    session["chapters"] = chapters
-    session["source_name"] = source_name
+    session.update({
+        "chapters": chapters,
+        "source_name": source_name,
+        "message": query.message,
+        "selected_index": 0
+    })
 
     total = len(chapters)
     start = page * CHAPTERS_PER_PAGE
@@ -182,9 +167,8 @@ async def chapter_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    session = await ensure_owner(update, context)
-    if not session:
-        return
+    user_id = query.from_user.id
+    session = get_session(user_id)
 
     _, index_str = query.data.split("|")
     session["selected_index"] = int(index_str)
@@ -192,7 +176,7 @@ async def chapter_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     buttons = [
         [InlineKeyboardButton("🔻 Baixar este", callback_data="d|single")],
         [InlineKeyboardButton("✅ Baixar todos", callback_data="d|all")],
-        [InlineKeyboardButton("📝 Baixar até capítulo", callback_data="input_cap")],
+        [InlineKeyboardButton("📝 Baixar até capítulo", callback_data="d|input_cap")],
     ]
 
     await query.edit_message_text(
@@ -201,61 +185,55 @@ async def chapter_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-# ================= DOWNLOAD =================
+# ================= DOWNLOAD CALLBACK =================
 async def download_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if block_private(update):
-        return
-
     query = update.callback_query
     await query.answer()
 
-    session = await ensure_owner(update, context)
-    if not session:
-        return
+    user_id = query.from_user.id
+    session = get_session(user_id)
 
     chapters = session.get("chapters")
     index = session.get("selected_index")
     source_name = session.get("source_name")
+    message = session.get("message")
 
     if not chapters:
         return await query.message.reply_text("Sessão expirada.")
 
     _, mode = query.data.split("|")
+    selected = []
 
     if mode == "single":
         selected = [chapters[index]]
     elif mode == "all":
         selected = chapters[index:]
-    else:
-        # input_cap será tratado pelo handler de mensagem
-        return await query.message.reply_text(
-            "Digite o número do capítulo até onde deseja baixar:",
-        )
+    elif mode == "input_cap":
+        await query.message.reply_text("Digite o número do capítulo até onde deseja baixar:")
+        return
 
     for chapter in selected:
-        await DOWNLOAD_QUEUE.put(
-            (query.message, get_all_sources()[source_name], chapter)
-        )
+        await DOWNLOAD_QUEUE.put({
+            "user_id": user_id,
+            "message": message,
+            "source": get_all_sources()[source_name],
+            "chapter": chapter
+        })
 
     await query.message.reply_text(
         f"✅ {len(selected)} capítulo(s) adicionados à fila.\n"
-        f"📦 Posição atual: {DOWNLOAD_QUEUE.qsize()}"
+        f"📦 Posição atual na fila: {DOWNLOAD_QUEUE.qsize()}"
     )
 
 
 # ================= INPUT DE CAPÍTULO =================
 async def input_cap_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if block_private(update):
-        return
-
     msg = update.effective_message
-    # Assume que a mensagem original do menu de capítulos está respondida
-    if not msg.reply_to_message:
-        return
+    user_id = msg.from_user.id
+    session = USER_SESSIONS.get(user_id)
 
-    session = get_session(context, msg.reply_to_message.message_id)
     if not session or "chapters" not in session or "selected_index" not in session:
-        return await msg.reply_text("Sessão expirada ou inválida.")
+        return await msg.reply_text("Sessão expirada.")
 
     try:
         target = float(msg.text)
@@ -263,11 +241,12 @@ async def input_cap_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await msg.reply_text("Digite apenas o número do capítulo.")
 
     chapters = session["chapters"]
-    selected_index = session["selected_index"]
+    index = session["selected_index"]
+    source = get_all_sources()[session["source_name"]]
+    message = session["message"]
 
-    # Seleciona capítulos até o número informado
     selected = []
-    for ch in chapters[selected_index:]:
+    for ch in chapters[index:]:
         ch_num = ch.get("chapter_number")
         if float(ch_num) <= target:
             selected.append(ch)
@@ -275,17 +254,20 @@ async def input_cap_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             break
 
     for chapter in selected:
-        await DOWNLOAD_QUEUE.put(
-            (msg, get_all_sources()[session["source_name"]], chapter)
-        )
+        await DOWNLOAD_QUEUE.put({
+            "user_id": user_id,
+            "message": message,
+            "source": source,
+            "chapter": chapter
+        })
 
     await msg.reply_text(
         f"✅ {len(selected)} capítulo(s) adicionados à fila.\n"
-        f"📦 Posição atual: {DOWNLOAD_QUEUE.qsize()}"
+        f"📦 Posição atual na fila: {DOWNLOAD_QUEUE.qsize()}"
     )
 
 
-# ================= SEND =================
+# ================= SEND CHAPTER =================
 async def send_chapter(message, source, chapter):
     cid = chapter.get("url")
     num = chapter.get("chapter_number")
@@ -316,17 +298,20 @@ async def send_chapter(message, source, chapter):
 def main():
     app = ApplicationBuilder().token(os.getenv("BOT_TOKEN")).build()
 
+    # comandos
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("buscar", buscar))
     app.add_handler(CommandHandler("fila", fila))
 
+    # callbacks
     app.add_handler(CallbackQueryHandler(manga_callback, pattern="^m\\|"))
     app.add_handler(CallbackQueryHandler(chapter_callback, pattern="^c\\|"))
     app.add_handler(CallbackQueryHandler(download_callback, pattern="^d\\|"))
 
-    # Handler para capturar número do capítulo
+    # input capítulo
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, input_cap_handler))
 
+    # worker
     async def start_worker(app):
         app.create_task(download_worker())
         print("🚀 Worker iniciado")
