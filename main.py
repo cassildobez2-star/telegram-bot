@@ -1,6 +1,7 @@
 import os
 import logging
 import asyncio
+import traceback
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -27,13 +28,16 @@ DOWNLOAD_QUEUE = asyncio.Queue()
 
 # ================= WORKER =================
 async def download_worker():
+    print("🚀 Worker iniciado")
+
     while True:
         message, source, chapter = await DOWNLOAD_QUEUE.get()
 
         try:
             await send_chapter(message, source, chapter)
-        except Exception as e:
-            print("Erro no worker:", e)
+        except Exception:
+            print("❌ Erro no worker:")
+            traceback.print_exc()
 
         DOWNLOAD_QUEUE.task_done()
 
@@ -80,7 +84,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-# ================= FILA COMMAND =================
+# ================= FILA =================
 async def fila(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if block_private(update):
         return
@@ -109,17 +113,16 @@ async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for source_name, source in sources.items():
         try:
             results = await source.search(query_text)
-            for manga in results[:6]:
-                title = manga.get("title")
-                url = manga.get("url")
 
+            for manga in results[:6]:
                 buttons.append([
                     InlineKeyboardButton(
-                        f"{title} ({source_name})",
-                        callback_data=f"m|{source_name}|{url}|0",
+                        f"{manga.get('title')} ({source_name})",
+                        callback_data=f"m|{source_name}|{manga.get('url')}|0",
                     )
                 ])
         except Exception:
+            traceback.print_exc()
             continue
 
     if not buttons:
@@ -257,69 +260,19 @@ async def download_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-# ================= CAP X =================
-async def input_cap_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if block_private(update):
-        return
-
-    query = update.callback_query
-    await query.answer()
-
-    await query.message.reply_text(
-        "Digite o número do capítulo até onde deseja baixar:"
-    )
-
-    return WAITING_FOR_CAP
-
-
-async def receive_cap_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if block_private(update):
-        return ConversationHandler.END
-
-    cap_text = update.message.text.strip()
-
-    if not cap_text.replace(".", "", 1).isdigit():
-        await update.message.reply_text("Digite um número válido.")
-        return WAITING_FOR_CAP
-
-    cap_number = float(cap_text)
-
-    # recupera última sessão ativa
-    sessions = context.chat_data.get("sessions", {})
-    if not sessions:
-        return ConversationHandler.END
-
-    session = list(sessions.values())[-1]
-
-    chapters = session.get("chapters")
-    source_name = session.get("source_name")
-
-    selected = [
-        c for c in chapters
-        if float(c.get("chapter_number") or 0) <= cap_number
-    ]
-
-    for chapter in selected:
-        await DOWNLOAD_QUEUE.put(
-            (update.message, get_all_sources()[source_name], chapter)
-        )
-
-    await update.message.reply_text(
-        f"✅ {len(selected)} capítulo(s) adicionados à fila.\n"
-        f"📦 Posição atual: {DOWNLOAD_QUEUE.qsize()}"
-    )
-
-    return ConversationHandler.END
-
-
 # ================= SEND =================
 async def send_chapter(message, source, chapter):
     cid = chapter.get("url")
     num = chapter.get("chapter_number")
     manga_title = chapter.get("manga_title", "Manga")
 
+    print(f"⬇️ Baixando capítulo {num}")
+
     imgs = await source.pages(cid)
+    print("🖼️ Imagens encontradas:", len(imgs))
+
     if not imgs:
+        await message.reply_text("❌ Não foi possível obter as imagens.")
         return
 
     cbz_buffer, cbz_name = await create_cbz(
@@ -338,11 +291,6 @@ async def send_chapter(message, source, chapter):
 def main():
     app = ApplicationBuilder().token(os.getenv("BOT_TOKEN")).build()
 
-    async def post_init(application):
-        application.create_task(download_worker())
-
-    app.post_init = post_init
-
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("buscar", buscar))
     app.add_handler(CommandHandler("fila", fila))
@@ -351,17 +299,8 @@ def main():
     app.add_handler(CallbackQueryHandler(chapter_callback, pattern="^c\\|"))
     app.add_handler(CallbackQueryHandler(download_callback, pattern="^d\\|"))
 
-    conv_handler = ConversationHandler(
-        entry_points=[CallbackQueryHandler(input_cap_callback, pattern="^input_cap$")],
-        states={
-            WAITING_FOR_CAP: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_cap_number)
-            ]
-        },
-        fallbacks=[],
-    )
-
-    app.add_handler(conv_handler)
+    # Inicia worker corretamente
+    app.create_task(download_worker())
 
     app.run_polling(drop_pending_updates=True)
 
