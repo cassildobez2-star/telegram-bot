@@ -1,23 +1,22 @@
 import asyncio
 import traceback
-import os
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
-    CallbackQueryHandler,
     ContextTypes,
 )
 
 from config import BOT_TOKEN
 from utils.loader import get_all_sources
-from utils.cbz import create_volume_cbz_disk
+from utils.cbz import create_zip_streaming
 from userbot_client import upload_to_channel
 from channel_forwarder import forward_from_channel
 
 DOWNLOAD_QUEUE = asyncio.Queue()
 CANCEL_FLAGS = {}
+
 
 # ================= UTIL =================
 
@@ -31,74 +30,64 @@ async def worker(app):
     while True:
         item = await DOWNLOAD_QUEUE.get()
         try:
-            await send_volume(app, item)
+            await process_download(app, item)
         except Exception:
             traceback.print_exc()
         finally:
             DOWNLOAD_QUEUE.task_done()
 
 
-# ================= SEND VOLUME =================
+# ================= PROCESS =================
 
-async def send_volume(app, item):
+async def process_download(app, item):
     source = item["source"]
     chapters = item["chapters"]
     message = item["message"]
-    volume_number = item["volume_number"]
     user_id = item["user_id"]
 
-    progress = await message.reply_text("📦 Iniciando volume...")
+    progress_msg = await message.reply_text("📦 Iniciando streaming...")
 
-    # 🔥 Ordem decrescente garantida
+    # 🔥 Ordem decrescente
     chapters = sorted(
         chapters,
         key=lambda x: float(x.get("chapter_number", 0)),
         reverse=True
     )
 
-    total = len(chapters)
+    def cancel_check():
+        return CANCEL_FLAGS.get(user_id)
 
-    # Barra de progresso por capítulo
-    for i, chapter in enumerate(chapters):
-        if CANCEL_FLAGS.get(user_id):
-            await progress.edit_text("❌ Cancelado.")
-            CANCEL_FLAGS.pop(user_id, None)
-            return
-
-        percent = int(((i + 1) / total) * 100)
+    async def progress_callback(current, total, chapter_number):
+        percent = int((current / total) * 100)
         bar = "█" * (percent // 10) + "░" * (10 - percent // 10)
 
-        await progress.edit_text(
-            f"📦 Volume {volume_number}\n"
+        await progress_msg.edit_text(
+            f"📦 Criando ZIP único\n"
             f"[{bar}] {percent}%\n"
-            f"Cap {chapter['chapter_number']}"
+            f"Último capítulo: {chapter_number}"
         )
 
-        await asyncio.sleep(0.1)
-
-    await progress.edit_text("🗜 Compactando no disco...")
-
-    # 🔥 STREAMING REAL EM DISCO
-    filepath, filename = await create_volume_cbz_disk(
-        source,
-        chapters,
-        chapters[0].get("manga_title", "Manga"),
-        volume_number
+    # 🔥 STREAMING PURO
+    zip_buffer = await create_zip_streaming(
+        source=source,
+        chapters=chapters,
+        progress_callback=progress_callback,
+        cancel_check=cancel_check
     )
 
-    if CANCEL_FLAGS.get(user_id):
-        if os.path.exists(filepath):
-            os.remove(filepath)
-        await progress.edit_text("❌ Cancelado.")
+    if not zip_buffer:
+        await progress_msg.edit_text("❌ Cancelado.")
         CANCEL_FLAGS.pop(user_id, None)
         return
 
-    await progress.edit_text("⬆️ Enviando para canal...")
+    await progress_msg.edit_text("⬆️ Enviando para canal...")
 
-    # 🔥 ENVIA PELO CAMINHO DO ARQUIVO
-    msg_id = await upload_to_channel(filepath, filename)
+    msg_id = await upload_to_channel(
+        zip_buffer,
+        "Manga.zip"
+    )
 
-    await progress.edit_text("🚀 Distribuindo para grupo...")
+    await progress_msg.edit_text("🚀 Enviando para grupo...")
 
     await forward_from_channel(
         app.bot,
@@ -106,11 +95,9 @@ async def send_volume(app, item):
         msg_id
     )
 
-    await progress.edit_text("✅ Volume enviado com sucesso!")
+    await progress_msg.edit_text("✅ ZIP enviado com sucesso!")
 
-    # 🔥 Remove arquivo do disco
-    if os.path.exists(filepath):
-        os.remove(filepath)
+    CANCEL_FLAGS.pop(user_id, None)
 
 
 # ================= BUSCAR =================
@@ -125,72 +112,35 @@ async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = " ".join(context.args)
 
     sources = get_all_sources()
-    buttons = []
+    if not sources:
+        return await update.message.reply_text("Nenhuma source disponível.")
 
-    for name, source in sources.items():
-        try:
-            results = await source.search(query)
-        except:
-            continue
+    # pega primeira source disponível
+    source = list(sources.values())[0]
 
-        for manga in results[:3]:
-            buttons.append([
-                InlineKeyboardButton(
-                    f"{manga['title']} ({name})",
-                    callback_data=f"m|{name}|{manga['url']}"
-                )
-            ])
+    results = await source.search(query)
 
-    if not buttons:
+    if not results:
         return await update.message.reply_text("Nenhum resultado encontrado.")
 
-    await update.message.reply_text(
-        "Resultados:",
-        reply_markup=InlineKeyboardMarkup(buttons)
-    )
+    manga = results[0]
 
-
-# ================= CALLBACK =================
-
-async def manga_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    _, source_name, manga_id = query.data.split("|")
-
-    sources = get_all_sources()
-    source = sources[source_name]
-
-    chapters = await source.chapters(manga_id)
+    chapters = await source.chapters(manga["url"])
 
     if not chapters:
-        return await query.edit_message_text("Nenhum capítulo encontrado.")
+        return await update.message.reply_text("Nenhum capítulo encontrado.")
 
-    # 🔥 Ordem decrescente global
-    chapters = sorted(
-        chapters,
-        key=lambda x: float(x.get("chapter_number", 0)),
-        reverse=True
-    )
+    await DOWNLOAD_QUEUE.put({
+        "source": source,
+        "chapters": chapters,
+        "message": update.message,
+        "user_id": update.effective_user.id
+    })
 
-    volumes = [
-        chapters[i:i+50]
-        for i in range(0, len(chapters), 50)
-    ]
-
-    for vol_number, vol in enumerate(volumes, start=1):
-        await DOWNLOAD_QUEUE.put({
-            "volume_number": vol_number,
-            "chapters": vol,
-            "source": source,
-            "message": query.message,
-            "user_id": query.from_user.id
-        })
-
-    await query.edit_message_text("📦 Volumes adicionados à fila.")
+    await update.message.reply_text("📦 Download adicionado à fila.")
 
 
-# ================= CANCEL =================
+# ================= CANCELAR =================
 
 async def cancelar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not only_groups(update):
@@ -207,7 +157,6 @@ def main():
 
     app.add_handler(CommandHandler("buscar", buscar))
     app.add_handler(CommandHandler("cancelar", cancelar))
-    app.add_handler(CallbackQueryHandler(manga_callback, pattern="^m\\|"))
 
     async def start_worker(app):
         app.create_task(worker(app))
