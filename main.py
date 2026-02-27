@@ -1,10 +1,15 @@
 import asyncio
 import traceback
 
-from telegram import Update
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+)
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
+    CallbackQueryHandler,
     ContextTypes,
 )
 
@@ -16,7 +21,6 @@ from channel_forwarder import forward_from_channel
 
 DOWNLOAD_QUEUE = asyncio.Queue()
 CANCEL_FLAGS = {}
-
 
 # ================= UTIL =================
 
@@ -44,6 +48,7 @@ async def process_download(app, item):
     chapters = item["chapters"]
     message = item["message"]
     user_id = item["user_id"]
+    manga_title = item["title"]
 
     progress_msg = await message.reply_text("📦 Iniciando streaming...")
 
@@ -67,7 +72,6 @@ async def process_download(app, item):
             f"Último capítulo: {chapter_number}"
         )
 
-    # 🔥 STREAMING PURO
     zip_buffer = await create_zip_streaming(
         source=source,
         chapters=chapters,
@@ -84,7 +88,7 @@ async def process_download(app, item):
 
     msg_id = await upload_to_channel(
         zip_buffer,
-        "Manga.zip"
+        f"{manga_title}.zip"
     )
 
     await progress_msg.edit_text("🚀 Enviando para grupo...")
@@ -112,32 +116,73 @@ async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = " ".join(context.args)
 
     sources = get_all_sources()
+
     if not sources:
-        return await update.message.reply_text("Nenhuma source disponível.")
+        return await update.message.reply_text("Erro: nenhuma source carregada.")
 
-    # pega primeira source disponível
-    source = list(sources.values())[0]
+    buttons = []
 
-    results = await source.search(query)
+    for name, source in sources.items():
+        try:
+            results = await source.search(query)
+        except Exception as e:
+            print(f"Erro na source {name}: {e}")
+            continue
 
-    if not results:
+        if not results:
+            continue
+
+        for manga in results[:3]:
+            buttons.append([
+                InlineKeyboardButton(
+                    f"{manga['title']} ({name})",
+                    callback_data=f"m|{name}|{manga['url']}"
+                )
+            ])
+
+    if not buttons:
         return await update.message.reply_text("Nenhum resultado encontrado.")
 
-    manga = results[0]
+    await update.message.reply_text(
+        "Resultados:",
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
 
-    chapters = await source.chapters(manga["url"])
+
+# ================= CALLBACK =================
+
+async def manga_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    _, source_name, manga_url = query.data.split("|")
+
+    sources = get_all_sources()
+
+    if source_name not in sources:
+        return await query.edit_message_text("Source não encontrada.")
+
+    source = sources[source_name]
+
+    try:
+        chapters = await source.chapters(manga_url)
+    except Exception as e:
+        return await query.edit_message_text(f"Erro ao carregar capítulos: {e}")
 
     if not chapters:
-        return await update.message.reply_text("Nenhum capítulo encontrado.")
+        return await query.edit_message_text("Nenhum capítulo encontrado.")
+
+    manga_title = chapters[0].get("manga_title", "Manga")
 
     await DOWNLOAD_QUEUE.put({
         "source": source,
         "chapters": chapters,
-        "message": update.message,
-        "user_id": update.effective_user.id
+        "message": query.message,
+        "user_id": query.from_user.id,
+        "title": manga_title
     })
 
-    await update.message.reply_text("📦 Download adicionado à fila.")
+    await query.edit_message_text("📦 Download adicionado à fila.")
 
 
 # ================= CANCELAR =================
@@ -157,6 +202,7 @@ def main():
 
     app.add_handler(CommandHandler("buscar", buscar))
     app.add_handler(CommandHandler("cancelar", cancelar))
+    app.add_handler(CallbackQueryHandler(manga_callback, pattern="^m\\|"))
 
     async def start_worker(app):
         app.create_task(worker(app))
