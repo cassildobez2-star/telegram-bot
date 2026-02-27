@@ -1,71 +1,54 @@
+import io
 import zipfile
-import httpx
 import asyncio
-from io import BytesIO
-
-CONNECTION_LIMIT = 2
-
-
-async def fetch_image(client, url, retries=3):
-    headers = {"User-Agent": "Mozilla/5.0"}
-
-    for _ in range(retries):
-        try:
-            r = await client.get(url, headers=headers)
-            r.raise_for_status()
-            return r.content
-        except:
-            await asyncio.sleep(1)
-
-    return None
+import httpx
 
 
 async def create_zip_streaming(
     source,
     chapters,
-    progress_callback=None,
-    cancel_check=None
+    progress_callback,
+    cancel_check
 ):
-    buffer = BytesIO()
+    zip_buffer = io.BytesIO()
 
-    limits = httpx.Limits(
-        max_connections=CONNECTION_LIMIT,
-        max_keepalive_connections=CONNECTION_LIMIT
-    )
-
-    async with httpx.AsyncClient(
-        timeout=60.0,
-        limits=limits
-    ) as client:
-
-        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zipf:
+    async with httpx.AsyncClient(timeout=20) as client:
+        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
 
             total = len(chapters)
 
-            for i, chapter in enumerate(chapters):
+            for index, chapter in enumerate(chapters):
 
-                if cancel_check and cancel_check():
+                if cancel_check():
                     return None
 
-                chapter_number = chapter["chapter_number"]
-                pages = await source.pages(chapter["url"])
+                chapter_number = chapter.get("chapter_number", "0")
 
-                for index, url in enumerate(pages):
+                try:
+                    pages = await source.pages(chapter["url"])
+                except:
+                    continue
 
-                    img = await fetch_image(client, url)
-                    if not img:
-                        continue
+                page_count = 0
 
-                    zipf.writestr(
-                        f"Cap_{chapter_number}/{index+1}.jpg",
-                        img
-                    )
+                for img_url in pages:
 
-                    # 🔥 libera memória imediatamente
-                    del img
+                    if cancel_check():
+                        return None
 
-                if progress_callback:
-                    await progress_callback(i + 1, total, chapter_number)
+                    try:
+                        r = await client.get(img_url)
+                        if r.status_code == 200:
+                            zip_file.writestr(
+                                f"Cap_{chapter_number}/{page_count}.jpg",
+                                r.content
+                            )
+                    except:
+                        pass
 
-    buffer.seek(0)
-    return buffer
+                    page_count += 1
+
+                await progress_callback(index + 1, total, chapter_number)
+
+    zip_buffer.seek(0)
+    return zip_buffer
