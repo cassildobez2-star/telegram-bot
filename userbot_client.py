@@ -1,5 +1,5 @@
 from pyrogram import Client
-from config import API_ID, API_HASH, STRING_SESSION, LOG_CHANNEL_ID
+from config import API_ID, API_HASH, STRING_SESSION, LOG_CHANNEL
 
 user_app = Client(
     "uploader_session",
@@ -11,7 +11,7 @@ user_app = Client(
 async def upload_to_channel(file_buffer, filename):
     async with user_app:
         msg = await user_app.send_document(
-            LOG_CHANNEL_ID,
+            LOG_CHANNEL,   # STRING
             document=file_buffer,
             file_name=filename
         )
