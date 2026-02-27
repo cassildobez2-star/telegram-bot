@@ -1,15 +1,13 @@
 import zipfile
 import httpx
 import asyncio
-from io import BytesIO
+import os
 
-CONNECTION_LIMIT = 5
+CONNECTION_LIMIT = 3
 
 
 async def fetch_image(client, url, retries=3):
-    headers = {
-        "User-Agent": "Mozilla/5.0"
-    }
+    headers = {"User-Agent": "Mozilla/5.0"}
 
     for _ in range(retries):
         try:
@@ -22,10 +20,9 @@ async def fetch_image(client, url, retries=3):
     return None
 
 
-async def create_volume_cbz_stream(source, chapters, manga_title, volume_number):
-    buffer = BytesIO()
-
+async def create_volume_cbz_disk(source, chapters, manga_title, volume_number):
     filename = f"{manga_title}_Volume_{volume_number}.cbz"
+    filepath = f"/tmp/{filename}"
 
     limits = httpx.Limits(
         max_connections=CONNECTION_LIMIT,
@@ -38,22 +35,18 @@ async def create_volume_cbz_stream(source, chapters, manga_title, volume_number)
         limits=limits
     ) as client:
 
-        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as cbz:
+        with zipfile.ZipFile(filepath, "w", zipfile.ZIP_DEFLATED) as cbz:
 
             for chapter in chapters:
 
                 chapter_number = chapter["chapter_number"]
-
-                # pega páginas do source
                 pages = await source.pages(chapter["url"])
 
                 # ordem decrescente
                 pages = list(reversed(pages))
 
                 for index, url in enumerate(pages):
-
                     img = await fetch_image(client, url)
-
                     if not img:
                         continue
 
@@ -62,8 +55,6 @@ async def create_volume_cbz_stream(source, chapters, manga_title, volume_number)
                         img
                     )
 
-                    # libera memória imediatamente
                     del img
 
-    buffer.seek(0)
-    return buffer, filename
+    return filepath, filename
