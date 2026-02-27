@@ -11,7 +11,7 @@ from telegram.ext import (
 
 from config import BOT_TOKEN
 from utils.loader import get_all_sources
-from utils.cbz import create_volume_cbz
+from utils.cbz import create_volume_cbz_stream
 from userbot_client import upload_to_channel
 from channel_forwarder import forward_from_channel
 
@@ -23,6 +23,7 @@ CANCEL_FLAGS = {}
 def only_groups(update: Update):
     return update.effective_chat.type in ["group", "supergroup"]
 
+
 # ================= WORKER =================
 
 async def worker(app):
@@ -30,10 +31,11 @@ async def worker(app):
         item = await DOWNLOAD_QUEUE.get()
         try:
             await send_volume(app, item)
-        except:
+        except Exception:
             traceback.print_exc()
         finally:
             DOWNLOAD_QUEUE.task_done()
+
 
 # ================= SEND VOLUME =================
 
@@ -47,14 +49,21 @@ async def send_volume(app, item):
     progress = await message.reply_text("📦 Iniciando volume...")
 
     total = len(chapters)
-    volume_data = []
+
+    # 🔥 Garante ORDEM DECRESCENTE
+    chapters = sorted(
+        chapters,
+        key=lambda x: float(x.get("chapter_number", 0)),
+        reverse=True
+    )
 
     for i, chapter in enumerate(chapters):
         if CANCEL_FLAGS.get(user_id):
             await progress.edit_text("❌ Cancelado.")
+            CANCEL_FLAGS.pop(user_id, None)
             return
 
-        percent = int((i / total) * 100)
+        percent = int(((i + 1) / total) * 100)
         bar = "█" * (percent // 10) + "░" * (10 - percent // 10)
 
         await progress.edit_text(
@@ -63,20 +72,19 @@ async def send_volume(app, item):
             f"Cap {chapter['chapter_number']}"
         )
 
-        imgs = await source.pages(chapter["url"])
+        await asyncio.sleep(0.2)
 
-        volume_data.append({
-            "chapter_number": chapter["chapter_number"],
-            "images": imgs
-        })
+    await progress.edit_text("⬆️ Compactando volume...")
 
-    await progress.edit_text("⬆️ Enviando para servidor...")
-
-    cbz_buffer, name = await create_volume_cbz(
-        volume_data,
+    # 🔥 STREAM DIRETO PARA CBZ (ULTRA ESTÁVEL)
+    cbz_buffer, name = await create_volume_cbz_stream(
+        source,
+        chapters,
         chapters[0].get("manga_title", "Manga"),
         volume_number
     )
+
+    await progress.edit_text("⬆️ Enviando para canal...")
 
     msg_id = await upload_to_channel(cbz_buffer, name)
 
@@ -90,6 +98,7 @@ async def send_volume(app, item):
 
     await progress.edit_text("✅ Volume enviado!")
 
+
 # ================= BUSCAR =================
 
 async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -100,12 +109,16 @@ async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await update.message.reply_text("Use /buscar nome")
 
     query = " ".join(context.args)
-    sources = get_all_sources()
 
+    sources = get_all_sources()
     buttons = []
 
     for name, source in sources.items():
-        results = await source.search(query)
+        try:
+            results = await source.search(query)
+        except:
+            continue
+
         for manga in results[:3]:
             buttons.append([
                 InlineKeyboardButton(
@@ -114,10 +127,14 @@ async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
             ])
 
+    if not buttons:
+        return await update.message.reply_text("Nenhum resultado encontrado.")
+
     await update.message.reply_text(
         "Resultados:",
         reply_markup=InlineKeyboardMarkup(buttons)
     )
+
 
 # ================= CALLBACK =================
 
@@ -126,14 +143,26 @@ async def manga_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     _, source_name, manga_id = query.data.split("|")
-    source = get_all_sources()[source_name]
+
+    sources = get_all_sources()
+    source = sources[source_name]
 
     chapters = await source.chapters(manga_id)
 
-    volumes = []
+    if not chapters:
+        return await query.edit_message_text("Nenhum capítulo encontrado.")
 
-    for i in range(0, len(chapters), 50):
-        volumes.append(chapters[i:i+50])
+    # 🔥 ORDEM DECRESCENTE GLOBAL
+    chapters = sorted(
+        chapters,
+        key=lambda x: float(x.get("chapter_number", 0)),
+        reverse=True
+    )
+
+    volumes = [
+        chapters[i:i+50]
+        for i in range(0, len(chapters), 50)
+    ]
 
     for vol_number, vol in enumerate(volumes, start=1):
         await DOWNLOAD_QUEUE.put({
@@ -146,6 +175,7 @@ async def manga_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await query.edit_message_text("📦 Volumes adicionados à fila.")
 
+
 # ================= CANCEL =================
 
 async def cancelar(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -153,7 +183,8 @@ async def cancelar(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     CANCEL_FLAGS[update.effective_user.id] = True
-    await update.message.reply_text("❌ Downloads cancelados.")
+    await update.message.reply_text("❌ Cancelamento solicitado.")
+
 
 # ================= MAIN =================
 
@@ -169,7 +200,9 @@ def main():
 
     app.post_init = start_worker
 
+    print("Bot rodando...")
     app.run_polling(drop_pending_updates=True)
+
 
 if __name__ == "__main__":
     main()
