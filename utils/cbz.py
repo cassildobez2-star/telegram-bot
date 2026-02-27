@@ -1,9 +1,9 @@
 import zipfile
 import httpx
 import asyncio
-import os
+from io import BytesIO
 
-CONNECTION_LIMIT = 3
+CONNECTION_LIMIT = 2
 
 
 async def fetch_image(client, url, retries=3):
@@ -20,9 +20,13 @@ async def fetch_image(client, url, retries=3):
     return None
 
 
-async def create_volume_cbz_disk(source, chapters, manga_title, volume_number):
-    filename = f"{manga_title}_Volume_{volume_number}.cbz"
-    filepath = f"/tmp/{filename}"
+async def create_zip_streaming(
+    source,
+    chapters,
+    progress_callback=None,
+    cancel_check=None
+):
+    buffer = BytesIO()
 
     limits = httpx.Limits(
         max_connections=CONNECTION_LIMIT,
@@ -30,31 +34,38 @@ async def create_volume_cbz_disk(source, chapters, manga_title, volume_number):
     )
 
     async with httpx.AsyncClient(
-        http2=True,
         timeout=60.0,
         limits=limits
     ) as client:
 
-        with zipfile.ZipFile(filepath, "w", zipfile.ZIP_DEFLATED) as cbz:
+        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zipf:
 
-            for chapter in chapters:
+            total = len(chapters)
+
+            for i, chapter in enumerate(chapters):
+
+                if cancel_check and cancel_check():
+                    return None
 
                 chapter_number = chapter["chapter_number"]
                 pages = await source.pages(chapter["url"])
 
-                # ordem decrescente
-                pages = list(reversed(pages))
-
                 for index, url in enumerate(pages):
+
                     img = await fetch_image(client, url)
                     if not img:
                         continue
 
-                    cbz.writestr(
+                    zipf.writestr(
                         f"Cap_{chapter_number}/{index+1}.jpg",
                         img
                     )
 
+                    # 🔥 libera memória imediatamente
                     del img
 
-    return filepath, filename
+                if progress_callback:
+                    await progress_callback(i + 1, total, chapter_number)
+
+    buffer.seek(0)
+    return buffer
