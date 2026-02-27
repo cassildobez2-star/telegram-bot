@@ -1,41 +1,27 @@
 import zipfile
 import httpx
-import asyncio
 from io import BytesIO
 
+async def create_volume_cbz(chapters_data, manga_title, volume_number):
+    buffer = BytesIO()
+    filename = f"{manga_title}_Volume_{volume_number}.cbz"
 
-async def download_image(client, url):
-    try:
-        r = await client.get(url, timeout=60)
-        r.raise_for_status()
-        return r.content
-    except Exception as e:
-        print(f"Erro ao baixar imagem: {e}")
-        return None
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as cbz:
+        async with httpx.AsyncClient(timeout=60) as client:
+            for chapter in chapters_data:
+                ch_num = chapter["chapter_number"]
+                images = chapter["images"]
 
+                for i, url in enumerate(images):
+                    try:
+                        r = await client.get(url)
+                        r.raise_for_status()
+                        cbz.writestr(
+                            f"Cap_{ch_num}/{i+1}.jpg",
+                            r.content
+                        )
+                    except:
+                        continue
 
-async def create_cbz(image_urls, manga_title, chapter_name):
-    safe_title = manga_title.replace("/", "").replace(" ", "_")
-    safe_chapter = str(chapter_name).replace("/", "").replace(" ", "_")
-
-    cbz_filename = f"{safe_title}_{safe_chapter}.cbz"
-
-    async with httpx.AsyncClient() as client:
-        tasks = [download_image(client, url) for url in image_urls]
-        images = await asyncio.gather(*tasks)
-
-    images = [img for img in images if img]
-
-    if not images:
-        raise Exception("Nenhuma imagem foi baixada")
-
-    # 🔥 CRIA CBZ NA MEMÓRIA
-    cbz_buffer = BytesIO()
-
-    with zipfile.ZipFile(cbz_buffer, "w", compression=zipfile.ZIP_DEFLATED) as cbz:
-        for i, img_bytes in enumerate(images):
-            cbz.writestr(f"{i+1}.jpg", img_bytes)
-
-    cbz_buffer.seek(0)
-
-    return cbz_buffer, cbz_filename
+    buffer.seek(0)
+    return buffer, filename
