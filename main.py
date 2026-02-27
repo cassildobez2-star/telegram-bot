@@ -1,10 +1,6 @@
 import asyncio
 import math
-from telegram import (
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup
-)
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -12,7 +8,7 @@ from telegram.ext import (
     ContextTypes,
 )
 
-from config import BOT_TOKEN, LOG_CHANNEL
+from config import BOT_TOKEN
 from utils.loader import get_all_sources
 from utils.cbz import create_volume_cbz
 from userbot_client import upload_to_channel
@@ -22,44 +18,53 @@ VOLUME_SIZE = 50
 active_tasks = {}
 
 
-# ===============================
+# =====================================
 # 🔒 Apenas grupos
-# ===============================
+# =====================================
 
-def group_only(update: Update):
+def is_group(update: Update):
     return update.effective_chat.type in ["group", "supergroup"]
 
 
-# ===============================
-# 🔍 Buscar Manga
-# ===============================
+# =====================================
+# 🔍 COMANDO /buscar
+# =====================================
 
 async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not group_only(update):
+    if not is_group(update):
         return
 
     if not context.args:
         await update.message.reply_text("Use: /buscar nome do mangá")
         return
 
-    query = " ".join(context.args)
+    query_text = " ".join(context.args)
 
     sources = get_all_sources()
+    if not sources:
+        await update.message.reply_text("Nenhuma source disponível.")
+        return
+
     source = sources[0]
 
-    results = await source.search(query)
+    try:
+        results = await source.search(query_text)
+    except Exception as e:
+        await update.message.reply_text(f"Erro na busca: {e}")
+        return
 
     if not results:
         await update.message.reply_text("Nenhum resultado encontrado.")
         return
 
-    buttons = [
-        [InlineKeyboardButton(
-            r["title"],
-            callback_data=f"manga|{r['id']}"
-        )]
-        for r in results[:10]
-    ]
+    buttons = []
+    for r in results[:10]:
+        buttons.append([
+            InlineKeyboardButton(
+                r["title"],
+                callback_data=f"manga|{r['id']}"
+            )
+        ])
 
     await update.message.reply_text(
         "Escolha o mangá:",
@@ -67,9 +72,9 @@ async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-# ===============================
-# 📖 Selecionar Manga
-# ===============================
+# =====================================
+# 📖 CALLBACK MANGA
+# =====================================
 
 async def manga_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -78,7 +83,16 @@ async def manga_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     _, manga_id = query.data.split("|")
 
     source = get_all_sources()[0]
-    chapters = await source.chapters(manga_id)
+
+    try:
+        chapters = await source.chapters(manga_id)
+    except Exception as e:
+        await query.edit_message_text(f"Erro ao carregar capítulos: {e}")
+        return
+
+    if not chapters:
+        await query.edit_message_text("Nenhum capítulo encontrado.")
+        return
 
     # 🔥 ORDEM CRESCENTE
     chapters = sorted(
@@ -87,8 +101,7 @@ async def manga_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     context.user_data["chapters"] = chapters
-    context.user_data["manga_id"] = manga_id
-    context.user_data["title"] = chapters[0]["manga_title"]
+    context.user_data["title"] = chapters[0].get("manga_title", "Manga")
 
     total = len(chapters)
     total_volumes = math.ceil(total / VOLUME_SIZE)
@@ -98,6 +111,7 @@ async def manga_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for v in range(total_volumes):
         start = v * VOLUME_SIZE + 1
         end = min((v + 1) * VOLUME_SIZE, total)
+
         buttons.append([
             InlineKeyboardButton(
                 f"📦 Volume {v+1} ({start}-{end})",
@@ -111,9 +125,9 @@ async def manga_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-# ===============================
-# 📦 Criar Volume
-# ===============================
+# =====================================
+# 📦 CALLBACK VOLUME
+# =====================================
 
 async def volume_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -122,50 +136,48 @@ async def volume_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     _, volume_index = query.data.split("|")
     volume_index = int(volume_index)
 
-    chapters = context.user_data["chapters"]
-    title = context.user_data["title"]
+    chapters = context.user_data.get("chapters")
+    title = context.user_data.get("title")
+
+    if not chapters:
+        await query.edit_message_text("Erro: capítulos não encontrados.")
+        return
 
     start = volume_index * VOLUME_SIZE
     end = start + VOLUME_SIZE
     selected = chapters[start:end]
 
-    cancel_button = InlineKeyboardMarkup([
+    cancel_markup = InlineKeyboardMarkup([
         [InlineKeyboardButton("❌ Cancelar", callback_data="cancel")]
     ])
 
     msg = await query.edit_message_text(
-        "📦 Preparando volume...\n\n[░░░░░░░░░░] 0%",
-        reply_markup=cancel_button
+        "📦 Preparando volume...\n[░░░░░░░░░░] 0%",
+        reply_markup=cancel_markup
     )
 
     task = asyncio.create_task(
-        generate_volume(
-            context,
-            msg,
-            selected,
-            title,
-            volume_index + 1
-        )
+        generate_volume(context, msg, selected, title, volume_index + 1)
     )
 
     active_tasks[query.from_user.id] = task
 
 
-# ===============================
-# 🔥 Gerar Volume
-# ===============================
+# =====================================
+# 🔥 GERAR VOLUME
+# =====================================
 
 async def generate_volume(context, msg, chapters, title, volume_number):
     total = len(chapters)
 
-    for i in range(total):
+    for i, ch in enumerate(chapters):
         percent = int(((i + 1) / total) * 100)
         bar = "█" * (percent // 10) + "░" * (10 - percent // 10)
 
         await msg.edit_text(
             f"📦 Volume {volume_number}\n"
             f"[{bar}] {percent}%\n"
-            f"Cap {chapters[i]['chapter_number']}",
+            f"Cap {ch['chapter_number']}",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("❌ Cancelar", callback_data="cancel")]
             ])
@@ -179,10 +191,10 @@ async def generate_volume(context, msg, chapters, title, volume_number):
         volume_number
     )
 
-    # 🔥 Envia para canal via userbot
+    # envia para canal via userbot
     message_id = await upload_to_channel(buffer, filename)
 
-    # 🔥 Bot copia do canal para grupo
+    # bot copia para grupo
     await forward_from_channel(
         context.bot,
         msg.chat_id,
@@ -192,9 +204,9 @@ async def generate_volume(context, msg, chapters, title, volume_number):
     await msg.edit_text("✅ Volume enviado com sucesso!")
 
 
-# ===============================
-# ❌ Cancelar
-# ===============================
+# =====================================
+# ❌ CANCELAR
+# =====================================
 
 async def cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -204,21 +216,22 @@ async def cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if task:
         task.cancel()
-        await query.edit_message_text("❌ Cancelado com sucesso.")
+        await query.edit_message_text("❌ Processo cancelado.")
 
 
-# ===============================
+# =====================================
 # 📥 /n X → baixar até capítulo X
-# ===============================
+# =====================================
 
 async def baixar_ate(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not group_only(update):
+    if not is_group(update):
         return
 
     if not context.args:
+        await update.message.reply_text("Use: /n número_do_capítulo")
         return
 
-    limite = int(context.args[0])
+    limite = float(context.args[0])
 
     chapters = context.user_data.get("chapters")
 
@@ -234,7 +247,7 @@ async def baixar_ate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     buffer, filename = await create_volume_cbz(
         selected,
         context.user_data["title"],
-        f"1-{limite}"
+        f"1-{int(limite)}"
     )
 
     message_id = await upload_to_channel(buffer, filename)
@@ -246,15 +259,16 @@ async def baixar_ate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-# ===============================
-# 🚀 START
-# ===============================
+# =====================================
+# 🚀 MAIN
+# =====================================
 
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("buscar", buscar))
     app.add_handler(CommandHandler("n", baixar_ate))
+
     app.add_handler(CallbackQueryHandler(manga_callback, pattern="^manga"))
     app.add_handler(CallbackQueryHandler(volume_callback, pattern="^volume"))
     app.add_handler(CallbackQueryHandler(cancel_callback, pattern="^cancel"))
