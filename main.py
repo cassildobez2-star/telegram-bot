@@ -1,5 +1,6 @@
 import asyncio
 import traceback
+import os
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -11,7 +12,7 @@ from telegram.ext import (
 
 from config import BOT_TOKEN
 from utils.loader import get_all_sources
-from utils.cbz import create_volume_cbz_stream
+from utils.cbz import create_volume_cbz_disk
 from userbot_client import upload_to_channel
 from channel_forwarder import forward_from_channel
 
@@ -48,15 +49,16 @@ async def send_volume(app, item):
 
     progress = await message.reply_text("📦 Iniciando volume...")
 
-    total = len(chapters)
-
-    # 🔥 Garante ORDEM DECRESCENTE
+    # 🔥 Ordem decrescente garantida
     chapters = sorted(
         chapters,
         key=lambda x: float(x.get("chapter_number", 0)),
         reverse=True
     )
 
+    total = len(chapters)
+
+    # Barra de progresso por capítulo
     for i, chapter in enumerate(chapters):
         if CANCEL_FLAGS.get(user_id):
             await progress.edit_text("❌ Cancelado.")
@@ -72,21 +74,29 @@ async def send_volume(app, item):
             f"Cap {chapter['chapter_number']}"
         )
 
-        await asyncio.sleep(0.2)
+        await asyncio.sleep(0.1)
 
-    await progress.edit_text("⬆️ Compactando volume...")
+    await progress.edit_text("🗜 Compactando no disco...")
 
-    # 🔥 STREAM DIRETO PARA CBZ (ULTRA ESTÁVEL)
-    cbz_buffer, name = await create_volume_cbz_stream(
+    # 🔥 STREAMING REAL EM DISCO
+    filepath, filename = await create_volume_cbz_disk(
         source,
         chapters,
         chapters[0].get("manga_title", "Manga"),
         volume_number
     )
 
+    if CANCEL_FLAGS.get(user_id):
+        if os.path.exists(filepath):
+            os.remove(filepath)
+        await progress.edit_text("❌ Cancelado.")
+        CANCEL_FLAGS.pop(user_id, None)
+        return
+
     await progress.edit_text("⬆️ Enviando para canal...")
 
-    msg_id = await upload_to_channel(cbz_buffer, name)
+    # 🔥 ENVIA PELO CAMINHO DO ARQUIVO
+    msg_id = await upload_to_channel(filepath, filename)
 
     await progress.edit_text("🚀 Distribuindo para grupo...")
 
@@ -96,7 +106,11 @@ async def send_volume(app, item):
         msg_id
     )
 
-    await progress.edit_text("✅ Volume enviado!")
+    await progress.edit_text("✅ Volume enviado com sucesso!")
+
+    # 🔥 Remove arquivo do disco
+    if os.path.exists(filepath):
+        os.remove(filepath)
 
 
 # ================= BUSCAR =================
@@ -152,7 +166,7 @@ async def manga_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not chapters:
         return await query.edit_message_text("Nenhum capítulo encontrado.")
 
-    # 🔥 ORDEM DECRESCENTE GLOBAL
+    # 🔥 Ordem decrescente global
     chapters = sorted(
         chapters,
         key=lambda x: float(x.get("chapter_number", 0)),
