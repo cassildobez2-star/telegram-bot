@@ -10,19 +10,22 @@ from telegram.ext import (
 )
 
 from config import BOT_TOKEN
-from worker import TASK_QUEUE, worker, cancel_task
+from utils.worker import TASK_QUEUE, worker, cancel_task
 from utils.loader import get_all_sources
 
+
+# Guarda contexto por usuário
 USER_CONTEXT = {}
 
-# ================= BUSCAR =================
+
+# ================= BUSCAR (SÓ GRUPOS) =================
 
 async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type not in ["group", "supergroup"]:
         return
 
     if not context.args:
-        return await update.message.reply_text("Use /buscar nome")
+        return await update.message.reply_text("Use: /buscar nome")
 
     query = " ".join(context.args)
     sources = get_all_sources()
@@ -30,11 +33,19 @@ async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🔎 Buscando...")
 
     for name, source in sources.items():
-        results = await source.search(query)
+        try:
+            results = await source.search(query)
+        except Exception as e:
+            print("Erro na source:", e)
+            continue
 
         if results:
             manga = results[0]
-            chapters = await source.chapters(manga["url"])
+
+            try:
+                chapters = await source.chapters(manga["url"])
+            except Exception as e:
+                return await update.message.reply_text("Erro ao carregar capítulos.")
 
             USER_CONTEXT[update.effective_user.id] = {
                 "chapters": chapters,
@@ -43,10 +54,11 @@ async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
             }
 
             return await update.message.reply_text(
-                f"📚 {manga['title']}\nEnvie número do capítulo."
+                f"📚 {manga['title']}\n\n"
+                f"Envie o número do capítulo."
             )
 
-    await update.message.reply_text("❌ Nenhum resultado.")
+    await update.message.reply_text("❌ Nenhum resultado encontrado.")
 
 
 # ================= SELECIONAR CAP =================
@@ -67,9 +79,9 @@ async def select_cap(update: Update, context: ContextTypes.DEFAULT_TYPE):
     USER_CONTEXT[user_id]["selected"] = selected
 
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("📖 Este", callback_data="este")],
-        [InlineKeyboardButton("📚 Até X", callback_data="ate")],
-        [InlineKeyboardButton("📦 Todos", callback_data="todos")],
+        [InlineKeyboardButton("📖 Baixar este", callback_data="este")],
+        [InlineKeyboardButton("📚 Baixar até X", callback_data="ate")],
+        [InlineKeyboardButton("📦 Baixar todos", callback_data="todos")],
         [InlineKeyboardButton("❌ Cancelar", callback_data="cancelar")]
     ])
 
@@ -101,10 +113,13 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             c for c in chapters
             if int(c["chapter_number"]) == selected
         ]
+
     elif data == "todos":
         selected_chapters = chapters
+
     elif data == "ate":
-        return await query.edit_message_text("Envie /n numero")
+        return await query.edit_message_text("Envie: /n número_inicial")
+
     else:
         return
 
@@ -122,13 +137,23 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ================= RANGE =================
 
 async def baixar_ate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type not in ["group", "supergroup"]:
+        return
+
     user_id = update.effective_user.id
 
     if user_id not in USER_CONTEXT:
         return
 
+    if not context.args:
+        return await update.message.reply_text("Use: /n número")
+
     start = int(context.args[0])
-    selected = USER_CONTEXT[user_id]["selected"]
+    selected = USER_CONTEXT[user_id].get("selected")
+
+    if selected is None:
+        return
+
     chapters = USER_CONTEXT[user_id]["chapters"]
 
     range_chapters = [
@@ -144,7 +169,17 @@ async def baixar_ate(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "title": USER_CONTEXT[user_id]["title"]
     })
 
-    await update.message.reply_text("📦 Range adicionado.")
+    await update.message.reply_text("📦 Range adicionado à fila.")
+
+
+# ================= CANCELAR =================
+
+async def cancelar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type not in ["group", "supergroup"]:
+        return
+
+    cancel_task(update.effective_user.id)
+    await update.message.reply_text("❌ Cancelamento solicitado.")
 
 
 # ================= MAIN =================
@@ -154,12 +189,20 @@ async def main():
 
     application.add_handler(CommandHandler("buscar", buscar))
     application.add_handler(CommandHandler("n", baixar_ate))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, select_cap))
+    application.add_handler(CommandHandler("cancelar", cancelar))
+
+    application.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND,
+        select_cap
+    ))
+
     application.add_handler(CallbackQueryHandler(callback))
 
+    # Inicia worker
     asyncio.create_task(worker(application))
 
-    print("🚀 Bot rodando...")
+    print("🚀 Bot rodando apenas em grupos...")
+
     await application.run_polling()
 
 
