@@ -7,9 +7,6 @@ from utils.task_manager import TASK_QUEUE, USER_CONTEXT, cancel_task
 from utils.worker import worker
 from utils.loader import get_all_sources
 
-
-# ================= CLIENT =================
-
 app = Client(
     "manga_bot",
     api_id=API_ID,
@@ -17,10 +14,9 @@ app = Client(
     bot_token=BOT_TOKEN
 )
 
+# ================= BUSCAR (SÓ GRUPO) =================
 
-# ================= BUSCAR =================
-
-@app.on_message(filters.command("buscar"))
+@app.on_message(filters.command("buscar") & filters.group)
 async def buscar(client, message):
     if len(message.command) < 2:
         return await message.reply("Use: /buscar nome")
@@ -33,17 +29,12 @@ async def buscar(client, message):
     for name, source in sources.items():
         try:
             results = await source.search(query)
-        except Exception as e:
-            print(f"Erro na source {name}: {e}")
+        except:
             continue
 
         if results:
             manga = results[0]
-
-            try:
-                chapters = await source.chapters(manga["url"])
-            except Exception as e:
-                return await message.reply("Erro ao carregar capítulos.")
+            chapters = await source.chapters(manga["url"])
 
             USER_CONTEXT[message.from_user.id] = {
                 "chapters": chapters,
@@ -59,9 +50,9 @@ async def buscar(client, message):
     await message.reply("❌ Nenhum resultado encontrado.")
 
 
-# ================= SELEÇÃO DE CAP =================
+# ================= SELEÇÃO (SÓ GRUPO) =================
 
-@app.on_message(filters.text & ~filters.command(["buscar", "n", "cancelar"]))
+@app.on_message(filters.text & filters.group & ~filters.command(["buscar", "n", "cancelar"]))
 async def select_cap(client, message):
     user_id = message.from_user.id
 
@@ -81,12 +72,12 @@ async def select_cap(client, message):
         [InlineKeyboardButton("❌ Cancelar", callback_data="cancelar")]
     ])
 
-    await message.reply("Escolha uma opção:", reply_markup=keyboard)
+    await message.reply("Escolha:", reply_markup=keyboard)
 
 
-# ================= CALLBACK =================
+# ================= CALLBACK (SÓ GRUPO) =================
 
-@app.on_callback_query()
+@app.on_callback_query(filters.group)
 async def callbacks(client, callback_query):
     user_id = callback_query.from_user.id
 
@@ -115,7 +106,7 @@ async def callbacks(client, callback_query):
         selected_chapters = chapters
 
     elif data == "ate":
-        return await callback_query.message.reply("Envie: /n número_inicial")
+        return await callback_query.message.reply("Envie: /n número")
 
     else:
         return
@@ -131,9 +122,9 @@ async def callbacks(client, callback_query):
     await callback_query.message.edit("📥 Adicionado à fila.")
 
 
-# ================= RANGE =================
+# ================= RANGE (SÓ GRUPO) =================
 
-@app.on_message(filters.command("n"))
+@app.on_message(filters.command("n") & filters.group)
 async def baixar_ate(client, message):
     user_id = message.from_user.id
 
@@ -167,21 +158,21 @@ async def baixar_ate(client, message):
     await message.reply("📦 Range adicionado à fila.")
 
 
-# ================= CANCELAR =================
+# ================= CANCELAR (SÓ GRUPO) =================
 
-@app.on_message(filters.command("cancelar"))
+@app.on_message(filters.command("cancelar") & filters.group)
 async def cancelar_cmd(client, message):
     cancel_task(message.from_user.id)
     await message.reply("❌ Cancelamento solicitado.")
 
 
-# ================= RUN (ESTÁVEL PYROGRAM v2) =================
+# ================= RUN ESTÁVEL =================
 
 async def main():
     async with app:
         asyncio.create_task(worker(app))
-        print("🚀 Bot rodando...")
-        await asyncio.Event().wait()  # mantém rodando
+        print("🚀 Bot rodando apenas em grupos...")
+        await asyncio.Event().wait()
 
 
 if __name__ == "__main__":
