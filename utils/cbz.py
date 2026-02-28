@@ -12,9 +12,7 @@ async def stream_zip_and_send(
     title,
     cancel_flags
 ):
-    zip_buffer = io.BytesIO()
-
-    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+    async with httpx.AsyncClient(timeout=60) as client:
 
         for chapter in chapters:
 
@@ -29,9 +27,12 @@ async def stream_zip_and_send(
                 f"⬇️ Baixando capítulo {chapter_number}..."
             )
 
-            pages = await source.pages(chapter["url"])
+            zip_buffer = io.BytesIO()
 
-            async with httpx.AsyncClient(timeout=60) as client:
+            with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+
+                pages = await source.pages(chapter["url"])
+
                 for idx, page_url in enumerate(pages):
 
                     if cancel_flags.get(user_id):
@@ -42,16 +43,18 @@ async def stream_zip_and_send(
                     response.raise_for_status()
 
                     zip_file.writestr(
-                        f"{chapter_number}/{idx+1}.jpg",
+                        f"{idx+1}.jpg",
                         response.content
                     )
 
-    zip_buffer.seek(0)
+            zip_buffer.seek(0)
 
-    await application.bot.send_document(
-        chat_id=chat_id,
-        document=zip_buffer,
-        filename=f"{title}.zip"
-    )
+            await application.bot.send_document(
+                chat_id=chat_id,
+                document=zip_buffer,
+                filename=f"{title}_Cap_{chapter_number}.cbz"
+            )
 
-    await application.bot.send_message(chat_id, "✅ Concluído.")
+            zip_buffer.close()
+
+    await application.bot.send_message(chat_id, "✅ Todos capítulos enviados.")
