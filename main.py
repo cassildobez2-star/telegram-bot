@@ -14,12 +14,6 @@ app = Client(
     bot_token=BOT_TOKEN
 )
 
-# ================= STARTUP =================
-
-@app.on_message(filters.command("start"))
-async def start(_, message):
-    await message.reply("Bot online.")
-
 # ================= BUSCAR =================
 
 @app.on_message(filters.command("buscar"))
@@ -159,14 +153,14 @@ async def cancelar_cmd(_, message):
     cancel_task(message.from_user.id)
     await message.reply("Cancelamento solicitado.")
 
-# ================= WORKER START =================
-
-@app.on_startup()
-async def startup(_, __):
-    asyncio.create_task(worker(app))
-    print("Worker iniciado.")
-
-# ================= RUN =================
+# ================= EXECUÇÃO CORRETA =================
 
 if __name__ == "__main__":
-    app.run()
+    app.start()
+
+    # Inicia worker corretamente no loop do Pyrogram
+    app.loop.create_task(worker(app))
+
+    print("Bot rodando...")
+
+    app.idle()
