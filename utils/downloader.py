@@ -1,42 +1,13 @@
 import httpx
-import asyncio
+from config import MAX_RETRIES, HTTP_TIMEOUT
 
-CONNECTION_LIMIT = 5
 
-async def fetch_image(client, url, retries=3):
-    headers = {
-        "User-Agent": "Mozilla/5.0"
-    }
-
-    for _ in range(retries):
+async def download_image(client, url):
+    for _ in range(MAX_RETRIES):
         try:
-            r = await client.get(url, headers=headers)
-            r.raise_for_status()
-            return r.content
-        except:
-            await asyncio.sleep(1)
-
+            response = await client.get(url, timeout=HTTP_TIMEOUT)
+            if response.status_code == 200:
+                return response.content
+        except Exception:
+            continue
     return None
-
-
-async def download_images(urls):
-    limits = httpx.Limits(
-        max_connections=CONNECTION_LIMIT,
-        max_keepalive_connections=CONNECTION_LIMIT
-    )
-
-    async with httpx.AsyncClient(
-        http2=True,
-        timeout=60.0,
-        limits=limits
-    ) as client:
-
-        images = []
-
-        # 🔥 Baixa em ORDEM DECRESCENTE
-        for url in reversed(urls):
-            img = await fetch_image(client, url)
-            if img:
-                images.append(img)
-
-        return images
