@@ -1,60 +1,32 @@
-import io
 import zipfile
 import httpx
+from io import BytesIO
 
 
-async def stream_zip_and_send(
-    application,
-    chat_id,
-    user_id,
-    chapters,
-    source,
-    title,
-    cancel_flags
-):
-    async with httpx.AsyncClient(timeout=60) as client:
+async def create_cbz(image_urls, manga_title, chapter_name):
+    safe_title = manga_title.replace("/", "").replace(" ", "_")
+    safe_chapter = str(chapter_name).replace("/", "").replace(" ", "_")
+    cbz_filename = f"{safe_title}_{safe_chapter}.cbz"
 
-        for chapter in chapters:
+    cbz_buffer = BytesIO()
 
-            if cancel_flags.get(user_id):
-                await application.bot.send_message(chat_id, "❌ Cancelado.")
-                return
+    limits = httpx.Limits(max_connections=5, max_keepalive_connections=5)
 
-            chapter_number = chapter["chapter_number"]
+    async with httpx.AsyncClient(
+        limits=limits,
+        timeout=30.0,
+        http2=True
+    ) as client:
 
-            await application.bot.send_message(
-                chat_id,
-                f"⬇️ Baixando capítulo {chapter_number}..."
-            )
+        with zipfile.ZipFile(cbz_buffer, "w", compression=zipfile.ZIP_DEFLATED) as cbz:
 
-            zip_buffer = io.BytesIO()
+            for i, url in enumerate(image_urls):
+                try:
+                    r = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
+                    r.raise_for_status()
+                    cbz.writestr(f"{i+1}.jpg", r.content)
+                except Exception:
+                    continue
 
-            with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
-
-                pages = await source.pages(chapter["url"])
-
-                for idx, page_url in enumerate(pages):
-
-                    if cancel_flags.get(user_id):
-                        await application.bot.send_message(chat_id, "❌ Cancelado.")
-                        return
-
-                    response = await client.get(page_url)
-                    response.raise_for_status()
-
-                    zip_file.writestr(
-                        f"{idx+1}.jpg",
-                        response.content
-                    )
-
-            zip_buffer.seek(0)
-
-            await application.bot.send_document(
-                chat_id=chat_id,
-                document=zip_buffer,
-                filename=f"{title}_Cap_{chapter_number}.cbz"
-            )
-
-            zip_buffer.close()
-
-    await application.bot.send_message(chat_id, "✅ Todos capítulos enviados.")
+    cbz_buffer.seek(0)
+    return cbz_buffer, cbz_filename
