@@ -184,7 +184,7 @@ async def cancelar(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ================= MAIN =================
 
-async def main():
+def main():
     application = ApplicationBuilder().token(BOT_TOKEN).build()
 
     application.add_handler(CommandHandler("buscar", buscar))
@@ -198,13 +198,16 @@ async def main():
 
     application.add_handler(CallbackQueryHandler(callback))
 
-    # Inicia worker
-    asyncio.create_task(worker(application))
+    # inicia worker no startup
+    async def start_worker(app):
+        asyncio.create_task(worker(app))
 
-    print("🚀 Bot rodando apenas em grupos...")
+    application.post_init = start_worker
 
-    await application.run_polling()
+    print("🚀 Bot rodando...")
+
+    application.run_polling()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
