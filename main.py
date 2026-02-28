@@ -1,217 +1,195 @@
 import asyncio
-import traceback
+from pyrogram import Client, filters
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-from telegram import (
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
+from config import API_ID, API_HASH, BOT_TOKEN
+from utils.task_manager import (
+    TASK_QUEUE,
+    USER_CONTEXT,
+    cancel_task,
+    clear_cancel,
 )
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    CallbackQueryHandler,
-    ContextTypes,
-)
-
-from config import BOT_TOKEN
+from utils.cbz import create_cbz
 from utils.loader import get_all_sources
-from utils.cbz import create_zip_streaming
-from userbot_client import upload_to_channel
-from channel_forwarder import forward_from_channel
 
-DOWNLOAD_QUEUE = asyncio.Queue()
-CANCEL_FLAGS = {}
-
-# ================= UTIL =================
-
-def only_groups(update: Update):
-    return update.effective_chat.type in ["group", "supergroup"]
-
+app = Client(
+    "manga_bot",
+    api_id=API_ID,
+    api_hash=API_HASH,
+    bot_token=BOT_TOKEN
+)
 
 # ================= WORKER =================
 
-async def worker(app):
+async def worker():
     while True:
-        item = await DOWNLOAD_QUEUE.get()
-        try:
-            await process_download(app, item)
-        except Exception:
-            traceback.print_exc()
-        finally:
-            DOWNLOAD_QUEUE.task_done()
+        task = await TASK_QUEUE.get()
 
+        user_id = task["user_id"]
+        chat_id = task["chat_id"]
+        chapters = task["chapters"]
+        source = task["source"]
+        title = task["title"]
 
-# ================= PROCESS =================
+        for chapter in chapters:
+            cbz = await create_cbz(source, chapter, user_id)
 
-async def process_download(app, item):
-    source = item["source"]
-    chapters = item["chapters"]
-    message = item["message"]
-    user_id = item["user_id"]
-    manga_title = item["title"]
+            if not cbz:
+                break
 
-    progress_msg = await message.reply_text("📦 Iniciando streaming...")
+            await app.send_document(
+                chat_id,
+                document=cbz,
+                file_name=f"{title} - Cap {chapter['chapter_number']}.cbz"
+            )
 
-    # 🔥 Ordem decrescente
-    chapters = sorted(
-        chapters,
-        key=lambda x: float(x.get("chapter_number", 0)),
-        reverse=True
-    )
+            del cbz
 
-    def cancel_check():
-        return CANCEL_FLAGS.get(user_id)
-
-    async def progress_callback(current, total, chapter_number):
-        percent = int((current / total) * 100)
-        bar = "█" * (percent // 10) + "░" * (10 - percent // 10)
-
-        await progress_msg.edit_text(
-            f"📦 Criando ZIP único\n"
-            f"[{bar}] {percent}%\n"
-            f"Último capítulo: {chapter_number}"
-        )
-
-    zip_buffer = await create_zip_streaming(
-        source=source,
-        chapters=chapters,
-        progress_callback=progress_callback,
-        cancel_check=cancel_check
-    )
-
-    if not zip_buffer:
-        await progress_msg.edit_text("❌ Cancelado.")
-        CANCEL_FLAGS.pop(user_id, None)
-        return
-
-    await progress_msg.edit_text("⬆️ Enviando para canal...")
-
-    msg_id = await upload_to_channel(
-        zip_buffer,
-        f"{manga_title}.zip"
-    )
-
-    await progress_msg.edit_text("🚀 Enviando para grupo...")
-
-    await forward_from_channel(
-        app.bot,
-        message.chat.id,
-        msg_id
-    )
-
-    await progress_msg.edit_text("✅ ZIP enviado com sucesso!")
-
-    CANCEL_FLAGS.pop(user_id, None)
-
+        clear_cancel(user_id)
+        TASK_QUEUE.task_done()
 
 # ================= BUSCAR =================
 
-async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not only_groups(update):
-        return
+@app.on_message(filters.command("buscar") & filters.group)
+async def buscar(_, message):
+    if len(message.command) < 2:
+        return await message.reply("Use /buscar nome")
 
-    if not context.args:
-        return await update.message.reply_text("Use /buscar nome")
-
-    query = " ".join(context.args)
-
+    query = " ".join(message.command[1:])
     sources = get_all_sources()
 
-    if not sources:
-        return await update.message.reply_text("Erro: nenhuma source carregada.")
-
-    buttons = []
-
     for name, source in sources.items():
-        try:
-            results = await source.search(query)
-        except Exception as e:
-            print(f"Erro na source {name}: {e}")
-            continue
+        results = await source.search(query)
+        if results:
+            manga = results[0]
+            chapters = await source.chapters(manga["url"])
 
-        if not results:
-            continue
+            USER_CONTEXT[message.from_user.id] = {
+                "chapters": chapters,
+                "source": source,
+                "title": manga["title"]
+            }
 
-        for manga in results[:3]:
-            buttons.append([
-                InlineKeyboardButton(
-                    f"{manga['title']} ({name})",
-                    callback_data=f"m|{name}|{manga['url']}"
-                )
-            ])
+            await message.reply(
+                f"Encontrado: {manga['title']}\n"
+                f"Envie o número do capítulo."
+            )
+            return
 
-    if not buttons:
-        return await update.message.reply_text("Nenhum resultado encontrado.")
+    await message.reply("Nenhum resultado encontrado.")
 
-    await update.message.reply_text(
-        "Resultados:",
-        reply_markup=InlineKeyboardMarkup(buttons)
-    )
+# ================= SELECIONAR CAP =================
 
+@app.on_message(filters.group & filters.text)
+async def select_cap(_, message):
+    user_id = message.from_user.id
+
+    if user_id not in USER_CONTEXT:
+        return
+
+    if not message.text.isdigit():
+        return
+
+    selected = int(message.text)
+    USER_CONTEXT[user_id]["selected"] = selected
+
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📖 Baixar este", callback_data="este")],
+        [InlineKeyboardButton("📚 Baixar até X", callback_data="ate")],
+        [InlineKeyboardButton("📦 Baixar todos", callback_data="todos")],
+        [InlineKeyboardButton("❌ Cancelar", callback_data="cancelar")]
+    ])
+
+    await message.reply("Escolha:", reply_markup=keyboard)
 
 # ================= CALLBACK =================
 
-async def manga_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
+@app.on_callback_query(filters.regex("^(este|ate|todos|cancelar)$"))
+async def callbacks(_, callback_query):
+    user_id = callback_query.from_user.id
+    data = callback_query.data
 
-    _, source_name, manga_url = query.data.split("|")
+    if user_id not in USER_CONTEXT:
+        return
 
-    sources = get_all_sources()
+    context = USER_CONTEXT[user_id]
+    chapters = context["chapters"]
+    selected = context.get("selected")
+    source = context["source"]
+    title = context["title"]
 
-    if source_name not in sources:
-        return await query.edit_message_text("Source não encontrada.")
+    if data == "cancelar":
+        cancel_task(user_id)
+        return await callback_query.message.edit("Cancelado.")
 
-    source = sources[source_name]
+    if data == "este":
+        selected_chapters = [
+            c for c in chapters
+            if int(c["chapter_number"]) == selected
+        ]
 
-    try:
-        chapters = await source.chapters(manga_url)
-    except Exception as e:
-        return await query.edit_message_text(f"Erro ao carregar capítulos: {e}")
+    elif data == "todos":
+        selected_chapters = chapters
 
-    if not chapters:
-        return await query.edit_message_text("Nenhum capítulo encontrado.")
+    elif data == "ate":
+        await callback_query.message.reply("Envie /n X")
+        return
 
-    manga_title = chapters[0].get("manga_title", "Manga")
-
-    await DOWNLOAD_QUEUE.put({
+    await TASK_QUEUE.put({
+        "user_id": user_id,
+        "chat_id": callback_query.message.chat.id,
+        "chapters": selected_chapters,
         "source": source,
-        "chapters": chapters,
-        "message": query.message,
-        "user_id": query.from_user.id,
-        "title": manga_title
+        "title": title
     })
 
-    await query.edit_message_text("📦 Download adicionado à fila.")
+    await callback_query.message.edit("Adicionado à fila.")
 
+# ================= RANGE =================
+
+@app.on_message(filters.command("n") & filters.group)
+async def baixar_ate(_, message):
+    user_id = message.from_user.id
+
+    if user_id not in USER_CONTEXT:
+        return
+
+    if len(message.command) < 2:
+        return
+
+    start = int(message.command[1])
+    selected = USER_CONTEXT[user_id]["selected"]
+    chapters = USER_CONTEXT[user_id]["chapters"]
+
+    range_chapters = [
+        c for c in chapters
+        if start <= int(c["chapter_number"]) <= selected
+    ]
+
+    await TASK_QUEUE.put({
+        "user_id": user_id,
+        "chat_id": message.chat.id,
+        "chapters": range_chapters,
+        "source": USER_CONTEXT[user_id]["source"],
+        "title": USER_CONTEXT[user_id]["title"]
+    })
+
+    await message.reply("Range adicionado à fila.")
 
 # ================= CANCELAR =================
 
-async def cancelar(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not only_groups(update):
-        return
+@app.on_message(filters.command("cancelar") & filters.group)
+async def cancelar(_, message):
+    cancel_task(message.from_user.id)
+    await message.reply("Cancelamento solicitado.")
 
-    CANCEL_FLAGS[update.effective_user.id] = True
-    await update.message.reply_text("❌ Cancelamento solicitado.")
+# ================= START =================
 
-
-# ================= MAIN =================
-
-def main():
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
-
-    app.add_handler(CommandHandler("buscar", buscar))
-    app.add_handler(CommandHandler("cancelar", cancelar))
-    app.add_handler(CallbackQueryHandler(manga_callback, pattern="^m\\|"))
-
-    async def start_worker(app):
-        app.create_task(worker(app))
-
-    app.post_init = start_worker
-
-    print("Bot rodando...")
-    app.run_polling(drop_pending_updates=True)
-
+async def main():
+    asyncio.create_task(worker())
+    await app.start()
+    print("Bot profissional rodando.")
+    await app.idle()
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
