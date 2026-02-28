@@ -1,50 +1,57 @@
 import io
 import zipfile
-import aiohttp
-from worker import CANCEL_FLAGS
+import httpx
 
-async def stream_zip_and_send(application, task):
-    bot = application.bot
-    chat_id = task["chat_id"]
-    user_id = task["user_id"]
-    chapters = task["chapters"]
-    source = task["source"]
-    title = task["title"]
 
-    status = await bot.send_message(chat_id, "📦 Criando ZIP...")
+async def stream_zip_and_send(
+    application,
+    chat_id,
+    user_id,
+    chapters,
+    source,
+    title,
+    cancel_flags
+):
+    zip_buffer = io.BytesIO()
 
-    buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
 
-    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zipf:
         for chapter in chapters:
-            if CANCEL_FLAGS.get(user_id):
-                await status.edit_text("❌ Cancelado.")
+
+            if cancel_flags.get(user_id):
+                await application.bot.send_message(chat_id, "❌ Cancelado.")
                 return
+
+            chapter_number = chapter["chapter_number"]
+
+            await application.bot.send_message(
+                chat_id,
+                f"⬇️ Baixando capítulo {chapter_number}..."
+            )
 
             pages = await source.pages(chapter["url"])
 
-            for i, page_url in enumerate(pages):
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(page_url) as resp:
-                        data = await resp.read()
+            async with httpx.AsyncClient(timeout=60) as client:
+                for idx, page_url in enumerate(pages):
 
-                zipf.writestr(
-                    f"Cap_{chapter['chapter_number']}/{i}.jpg",
-                    data
-                )
+                    if cancel_flags.get(user_id):
+                        await application.bot.send_message(chat_id, "❌ Cancelado.")
+                        return
 
-            await status.edit_text(
-                f"📦 Processando Cap {chapter['chapter_number']}"
-            )
+                    response = await client.get(page_url)
+                    response.raise_for_status()
 
-    buffer.seek(0)
+                    zip_file.writestr(
+                        f"{chapter_number}/{idx+1}.jpg",
+                        response.content
+                    )
 
-    await status.edit_text("⬆️ Enviando...")
+    zip_buffer.seek(0)
 
-    await bot.send_document(
-        chat_id,
-        document=buffer,
+    await application.bot.send_document(
+        chat_id=chat_id,
+        document=zip_buffer,
         filename=f"{title}.zip"
     )
 
-    await status.edit_text("✅ Enviado com sucesso!")
+    await application.bot.send_message(chat_id, "✅ Concluído.")
