@@ -6,10 +6,9 @@ from config import API_ID, API_HASH, BOT_TOKEN
 from utils.task_manager import (
     TASK_QUEUE,
     USER_CONTEXT,
-    cancel_task,
-    clear_cancel,
+    cancel_task
 )
-from utils.cbz import create_cbz
+from utils.worker import worker
 from utils.loader import get_all_sources
 
 app = Client(
@@ -18,35 +17,6 @@ app = Client(
     api_hash=API_HASH,
     bot_token=BOT_TOKEN
 )
-
-# ================= WORKER =================
-
-async def worker():
-    while True:
-        task = await TASK_QUEUE.get()
-
-        user_id = task["user_id"]
-        chat_id = task["chat_id"]
-        chapters = task["chapters"]
-        source = task["source"]
-        title = task["title"]
-
-        for chapter in chapters:
-            cbz = await create_cbz(source, chapter, user_id)
-
-            if not cbz:
-                break
-
-            await app.send_document(
-                chat_id,
-                document=cbz,
-                file_name=f"{title} - Cap {chapter['chapter_number']}.cbz"
-            )
-
-            del cbz
-
-        clear_cancel(user_id)
-        TASK_QUEUE.task_done()
 
 # ================= BUSCAR =================
 
@@ -78,7 +48,7 @@ async def buscar(_, message):
 
     await message.reply("Nenhum resultado encontrado.")
 
-# ================= SELECIONAR CAP =================
+# ================= SELEÇÃO DE CAP =================
 
 @app.on_message(filters.group & filters.text)
 async def select_cap(_, message):
@@ -104,15 +74,16 @@ async def select_cap(_, message):
 
 # ================= CALLBACK =================
 
-@app.on_callback_query(filters.regex("^(este|ate|todos|cancelar)$"))
+@app.on_callback_query()
 async def callbacks(_, callback_query):
     user_id = callback_query.from_user.id
-    data = callback_query.data
 
     if user_id not in USER_CONTEXT:
         return
 
+    data = callback_query.data
     context = USER_CONTEXT[user_id]
+
     chapters = context["chapters"]
     selected = context.get("selected")
     source = context["source"]
@@ -133,6 +104,9 @@ async def callbacks(_, callback_query):
 
     elif data == "ate":
         await callback_query.message.reply("Envie /n X")
+        return
+
+    else:
         return
 
     await TASK_QUEUE.put({
@@ -183,11 +157,14 @@ async def cancelar(_, message):
     cancel_task(message.from_user.id)
     await message.reply("Cancelamento solicitado.")
 
-# ================= START =================
+# ================= START CORRETO =================
 
 async def main():
-    asyncio.create_task(worker())
     await app.start()
+
+    # Worker rodando corretamente no loop do Pyrogram
+    app.loop.create_task(worker(app))
+
     print("Bot profissional rodando.")
     await app.idle()
 
