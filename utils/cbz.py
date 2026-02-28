@@ -1,54 +1,28 @@
 import io
 import zipfile
-import asyncio
 import httpx
+from utils.downloader import download_image
+from utils.task_manager import is_cancelled
 
+async def create_cbz(source, chapter, user_id):
+    buffer = io.BytesIO()
 
-async def create_zip_streaming(
-    source,
-    chapters,
-    progress_callback,
-    cancel_check
-):
-    zip_buffer = io.BytesIO()
+    async with httpx.AsyncClient() as client:
+        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zipf:
 
-    async with httpx.AsyncClient(timeout=20) as client:
-        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+            pages = await source.pages(chapter["url"])
 
-            total = len(chapters)
+            for index, img_url in enumerate(pages):
 
-            for index, chapter in enumerate(chapters):
-
-                if cancel_check():
+                if is_cancelled(user_id):
                     return None
 
-                chapter_number = chapter.get("chapter_number", "0")
+                img = await download_image(client, img_url)
 
-                try:
-                    pages = await source.pages(chapter["url"])
-                except:
-                    continue
+                if img:
+                    zipf.writestr(f"{index:03}.jpg", img)
 
-                page_count = 0
+                del img
 
-                for img_url in pages:
-
-                    if cancel_check():
-                        return None
-
-                    try:
-                        r = await client.get(img_url)
-                        if r.status_code == 200:
-                            zip_file.writestr(
-                                f"Cap_{chapter_number}/{page_count}.jpg",
-                                r.content
-                            )
-                    except:
-                        pass
-
-                    page_count += 1
-
-                await progress_callback(index + 1, total, chapter_number)
-
-    zip_buffer.seek(0)
-    return zip_buffer
+    buffer.seek(0)
+    return buffer
