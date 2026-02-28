@@ -1,34 +1,31 @@
-from utils.task_manager import TASK_QUEUE, clear_cancel
-from utils.cbz import create_cbz
+import asyncio
+from utils.cbz import stream_zip_and_send
 
-async def worker(app):
+TASK_QUEUE = asyncio.Queue()
+ACTIVE_USERS = {}
+CANCEL_FLAGS = {}
+
+async def worker(application):
     while True:
         task = await TASK_QUEUE.get()
-
         user_id = task["user_id"]
-        chat_id = task["chat_id"]
-        chapters = task["chapters"]
-        source = task["source"]
-        title = task["title"]
+
+        if ACTIVE_USERS.get(user_id):
+            TASK_QUEUE.task_done()
+            continue
+
+        ACTIVE_USERS[user_id] = True
+        CANCEL_FLAGS[user_id] = False
 
         try:
-            for chapter in chapters:
-
-                cbz = await create_cbz(source, chapter, user_id)
-
-                if not cbz:
-                    break  # cancelado
-
-                await app.send_document(
-                    chat_id,
-                    document=cbz,
-                    file_name=f"{title} - Cap {chapter['chapter_number']}.cbz"
-                )
-
-                del cbz
-
+            await stream_zip_and_send(application, task)
         except Exception as e:
-            print(f"Erro no worker: {e}")
+            print("Erro worker:", e)
+        finally:
+            ACTIVE_USERS.pop(user_id, None)
+            CANCEL_FLAGS.pop(user_id, None)
+            TASK_QUEUE.task_done()
 
-        clear_cancel(user_id)
-        TASK_QUEUE.task_done()
+
+def cancel_task(user_id):
+    CANCEL_FLAGS[user_id] = True
