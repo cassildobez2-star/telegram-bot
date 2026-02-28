@@ -3,11 +3,7 @@ from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 from config import API_ID, API_HASH, BOT_TOKEN
-from utils.task_manager import (
-    TASK_QUEUE,
-    USER_CONTEXT,
-    cancel_task
-)
+from utils.task_manager import TASK_QUEUE, USER_CONTEXT, cancel_task
 from utils.worker import worker
 from utils.loader import get_all_sources
 
@@ -18,9 +14,15 @@ app = Client(
     bot_token=BOT_TOKEN
 )
 
+# ================= STARTUP =================
+
+@app.on_message(filters.command("start"))
+async def start(_, message):
+    await message.reply("Bot online.")
+
 # ================= BUSCAR =================
 
-@app.on_message(filters.command("buscar") & filters.group)
+@app.on_message(filters.command("buscar"))
 async def buscar(_, message):
     if len(message.command) < 2:
         return await message.reply("Use /buscar nome")
@@ -30,6 +32,7 @@ async def buscar(_, message):
 
     for name, source in sources.items():
         results = await source.search(query)
+
         if results:
             manga = results[0]
             chapters = await source.chapters(manga["url"])
@@ -48,9 +51,9 @@ async def buscar(_, message):
 
     await message.reply("Nenhum resultado encontrado.")
 
-# ================= SELEÇÃO DE CAP =================
+# ================= SELEÇÃO =================
 
-@app.on_message(filters.group & filters.text)
+@app.on_message(filters.text & ~filters.command(["buscar", "cancelar", "n"]))
 async def select_cap(_, message):
     user_id = message.from_user.id
 
@@ -103,8 +106,7 @@ async def callbacks(_, callback_query):
         selected_chapters = chapters
 
     elif data == "ate":
-        await callback_query.message.reply("Envie /n X")
-        return
+        return await callback_query.message.reply("Envie /n X")
 
     else:
         return
@@ -121,7 +123,7 @@ async def callbacks(_, callback_query):
 
 # ================= RANGE =================
 
-@app.on_message(filters.command("n") & filters.group)
+@app.on_message(filters.command("n"))
 async def baixar_ate(_, message):
     user_id = message.from_user.id
 
@@ -152,21 +154,19 @@ async def baixar_ate(_, message):
 
 # ================= CANCELAR =================
 
-@app.on_message(filters.command("cancelar") & filters.group)
-async def cancelar(_, message):
+@app.on_message(filters.command("cancelar"))
+async def cancelar_cmd(_, message):
     cancel_task(message.from_user.id)
     await message.reply("Cancelamento solicitado.")
 
-# ================= START CORRETO =================
+# ================= WORKER START =================
 
-async def main():
-    await app.start()
+@app.on_startup()
+async def startup(_, __):
+    asyncio.create_task(worker(app))
+    print("Worker iniciado.")
 
-    # Worker rodando corretamente no loop do Pyrogram
-    app.loop.create_task(worker(app))
-
-    print("Bot profissional rodando.")
-    await app.idle()
+# ================= RUN =================
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    app.run()
