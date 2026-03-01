@@ -2,12 +2,7 @@ import os
 import asyncio
 import logging
 
-from telegram import (
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-)
-
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -29,7 +24,9 @@ logging.basicConfig(level=logging.INFO)
 DOWNLOAD_QUEUE = asyncio.Queue()
 DOWNLOAD_SEMAPHORE = asyncio.Semaphore(2)
 CHAPTERS_PER_PAGE = 10
+
 SEARCH_CACHE = {}
+MESSAGE_OWNERS = {}
 
 # ======================================================
 # FILA
@@ -40,6 +37,16 @@ async def add_job(job):
 
 def queue_size():
     return DOWNLOAD_QUEUE.qsize()
+
+# ======================================================
+# VERIFICAR DONO
+# ======================================================
+
+def is_owner(query):
+    message_id = query.message.message_id
+    user_id = query.from_user.id
+    owner_id = MESSAGE_OWNERS.get(message_id)
+    return owner_id == user_id
 
 # ======================================================
 # ENVIO CAPÍTULO
@@ -109,13 +116,13 @@ async def worker():
         DOWNLOAD_QUEUE.task_done()
 
 # ======================================================
-# BUSCAR
+# BUSCAR – TODAS AS FONTES
 # ======================================================
 
 async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    query = " ".join(context.args)
-    if not query:
+    query_text = " ".join(context.args)
+    if not query_text:
         await update.message.reply_text("❌ Use /bb <nome do mangá>")
         return
 
@@ -126,9 +133,10 @@ async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     for source_name, source in get_all_sources().items():
         try:
-            results = await source.search(query)
+            results = await source.search(query_text)
 
-            for manga in results[:5]:
+            # 🔥 AGORA PEGA TODOS RESULTADOS DA FONTE
+            for manga in results:
                 cache.append({
                     "source": source_name,
                     "title": manga["title"],
@@ -141,14 +149,16 @@ async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         callback_data=f"select|{len(cache)-1}",
                     )
                 ])
-        except:
-            pass
+
+        except Exception as e:
+            print(f"Erro na fonte {source_name}:", e)
 
     if not buttons:
         await msg.edit_text("❌ Nenhum resultado encontrado.")
         return
 
-    SEARCH_CACHE[update.effective_chat.id] = cache
+    SEARCH_CACHE[msg.message_id] = cache
+    MESSAGE_OWNERS[msg.message_id] = update.effective_user.id
 
     await msg.edit_text(
         "📚 Escolha o mangá:",
@@ -163,152 +173,30 @@ async def select_manga(update, context):
     query = update.callback_query
     await query.answer()
 
-    user_data = context.user_data
+    if not is_owner(query):
+        return  # 🔥 IGNORA SE NÃO FOR O DONO
 
-    chat_id = query.message.chat_id
-    data = SEARCH_CACHE[chat_id][int(query.data.split("|")[1])]
+    message_id = query.message.message_id
+    data = SEARCH_CACHE[message_id][int(query.data.split("|")[1])]
     source = get_all_sources()[data["source"]]
 
     chapters = await source.chapters(data["url"])
 
-    user_data["chapters"] = chapters
-    user_data["source"] = source
-    user_data["title"] = data["title"]
+    context.user_data["chapters"] = chapters
+    context.user_data["source"] = source
+    context.user_data["title"] = data["title"]
 
     buttons = [
         [InlineKeyboardButton("📥 Baixar tudo", callback_data="download_all")],
         [InlineKeyboardButton("📖 Ver capítulos", callback_data="chapters|0")],
     ]
 
-    await query.message.reply_text(
-        f"📖 {data['title']}\n\nTotal de capítulos: {len(chapters)}",
+    msg = await query.message.reply_text(
+        f"📖 {data['title']}\n\nTotal: {len(chapters)} capítulos",
         reply_markup=InlineKeyboardMarkup(buttons),
     )
 
-# ======================================================
-# PAGINAÇÃO CAPÍTULOS
-# ======================================================
-
-async def show_chapters(update, context):
-    query = update.callback_query
-    await query.answer()
-
-    user_data = context.user_data
-    page = int(query.data.split("|")[1])
-    chapters = user_data["chapters"]
-
-    start = page * CHAPTERS_PER_PAGE
-    end = start + CHAPTERS_PER_PAGE
-    subset = chapters[start:end]
-
-    buttons = []
-
-    for i, c in enumerate(subset):
-        buttons.append([
-            InlineKeyboardButton(
-                f"Cap {c.get('chapter_number')}",
-                callback_data=f"download_one|{start+i}",
-            )
-        ])
-
-    nav = []
-
-    if start > 0:
-        nav.append(
-            InlineKeyboardButton("◀", callback_data=f"chapters|{page-1}")
-        )
-
-    if end < len(chapters):
-        nav.append(
-            InlineKeyboardButton("▶", callback_data=f"chapters|{page+1}")
-        )
-
-    if nav:
-        buttons.append(nav)
-
-    buttons.append(
-        [InlineKeyboardButton("🔙 Voltar", callback_data="back_to_menu")]
-    )
-
-    await query.message.edit_text(
-        "📖 Escolha capítulo:",
-        reply_markup=InlineKeyboardMarkup(buttons),
-    )
-
-# ======================================================
-# VOLTAR MENU
-# ======================================================
-
-async def back_to_menu(update, context):
-    query = update.callback_query
-    await query.answer()
-
-    user_data = context.user_data
-    title = user_data["title"]
-    chapters = user_data["chapters"]
-
-    buttons = [
-        [InlineKeyboardButton("📥 Baixar tudo", callback_data="download_all")],
-        [InlineKeyboardButton("📖 Ver capítulos", callback_data="chapters|0")],
-    ]
-
-    await query.message.edit_text(
-        f"📖 {title}\n\nTotal de capítulos: {len(chapters)}",
-        reply_markup=InlineKeyboardMarkup(buttons),
-    )
-
-# ======================================================
-# DOWNLOADS
-# ======================================================
-
-async def download_all(update, context):
-    query = update.callback_query
-    await query.answer()
-
-    user_data = context.user_data
-    chapters = user_data["chapters"]
-    source = user_data["source"]
-
-    for ch in chapters:
-        await add_job({
-            "message": query.message,
-            "source": source,
-            "chapter": ch,
-        })
-
-    await query.message.reply_text(
-        f"✅ Todos capítulos adicionados.\n📦 Fila: {queue_size()}"
-    )
-
-async def download_one(update, context):
-    query = update.callback_query
-    await query.answer()
-
-    user_data = context.user_data
-    index = int(query.data.split("|")[1])
-    chapters = user_data["chapters"]
-    source = user_data["source"]
-
-    ch = chapters[index]
-
-    await add_job({
-        "message": query.message,
-        "source": source,
-        "chapter": ch,
-    })
-
-    await query.message.reply_text(
-        f"✅ Capítulo adicionado.\n📦 Fila: {queue_size()}"
-    )
-
-# ======================================================
-# STATUS
-# ======================================================
-
-async def status(update, context):
-    await update.message.reply_text(
-        f"📦 Fila atual: {queue_size()}"
-    )
+    MESSAGE_OWNERS[msg.message_id] = query.from_user.id
 
 # ======================================================
 # MAIN
@@ -318,13 +206,7 @@ def main():
     app = ApplicationBuilder().token(os.getenv("BOT_TOKEN")).build()
 
     app.add_handler(CommandHandler("bb", buscar))
-    app.add_handler(CommandHandler("status", status))
-
     app.add_handler(CallbackQueryHandler(select_manga, pattern="^select"))
-    app.add_handler(CallbackQueryHandler(show_chapters, pattern="^chapters"))
-    app.add_handler(CallbackQueryHandler(download_all, pattern="^download_all"))
-    app.add_handler(CallbackQueryHandler(download_one, pattern="^download_one"))
-    app.add_handler(CallbackQueryHandler(back_to_menu, pattern="^back_to_menu"))
 
     async def startup(app):
         asyncio.create_task(worker())
