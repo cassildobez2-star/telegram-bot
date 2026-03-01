@@ -11,8 +11,6 @@ from telegram.ext import (
     ContextTypes,
 )
 
-from telegram.error import RetryAfter, TimedOut, NetworkError
-
 from utils.loader import get_all_sources
 from utils.cbz import create_cbz
 
@@ -27,14 +25,14 @@ CHAPTERS_PER_PAGE = 15
 
 
 # ==========================================================
-# VERIFICAR DONO
+# DONO DO BOTÃO
 # ==========================================================
 
 def is_owner(query):
-    parts = query.data.split("|")
-    if len(parts) < 2:
+    try:
+        return query.from_user.id == int(query.data.split("|")[-1])
+    except:
         return False
-    return query.from_user.id == int(parts[-1])
 
 
 # ==========================================================
@@ -45,38 +43,33 @@ async def worker():
     while True:
         job = await DOWNLOAD_QUEUE.get()
         try:
-            await send_chapter(
-                job["message"],
-                job["source"],
-                job["chapter"],
-            )
+            await send_chapter(job)
         except Exception as e:
-            print("Erro Worker:", e)
-
-        await asyncio.sleep(1)
+            print("Erro worker:", e)
         DOWNLOAD_QUEUE.task_done()
 
 
-async def send_chapter(message, source, chapter):
+async def send_chapter(job):
 
     async with DOWNLOAD_SEMAPHORE:
 
+        message = job["message"]
+        source = job["source"]
+        chapter = job["chapter"]
+
         try:
-            imgs = await asyncio.wait_for(
-                source.pages(chapter["url"]),
-                timeout=60
-            )
+            pages = await source.pages(chapter["url"])
         except:
             await message.reply_text("❌ Erro ao obter páginas.")
             return
 
-        if not imgs:
+        if not pages:
             await message.reply_text("❌ Nenhuma página encontrada.")
             return
 
         try:
             cbz_buffer, cbz_name = await create_cbz(
-                imgs,
+                pages,
                 chapter.get("manga_title", "Manga"),
                 f"Cap_{chapter.get('chapter_number')}",
             )
@@ -84,29 +77,70 @@ async def send_chapter(message, source, chapter):
             await message.reply_text("❌ Erro ao criar CBZ.")
             return
 
-        await message.reply_document(
-            document=cbz_buffer,
-            filename=cbz_name
-        )
-
+        await message.reply_document(document=cbz_buffer, filename=cbz_name)
         cbz_buffer.close()
 
 
 # ==========================================================
-# MOSTRAR RESULTADOS
+# BUSCAR EM TODAS AS FONTES (AGUARDANDO TODAS)
 # ==========================================================
 
-async def show_results(message, user_id, page=0):
+async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    cache = SEARCH_CACHE[message.message_id]
-    total_pages = math.ceil(len(cache) / RESULTS_PER_PAGE)
+    query_text = " ".join(context.args)
+    if not query_text:
+        await update.message.reply_text("Use /bb <nome>")
+        return
+
+    msg = await update.message.reply_text("🔎 Buscando em todas as fontes...")
+
+    sources = get_all_sources()
+    tasks = []
+
+    for source_name, source in sources.items():
+        tasks.append(search_source(source_name, source, query_text))
+
+    results = await asyncio.gather(*tasks)
+
+    combined = []
+    for r in results:
+        combined.extend(r)
+
+    if not combined:
+        await msg.edit_text("❌ Nenhum resultado encontrado.")
+        return
+
+    SEARCH_CACHE[msg.message_id] = combined
+
+    await show_results(msg, update.effective_user.id, 0)
+
+
+async def search_source(name, source, query):
+    try:
+        res = await source.search(query)
+        return [
+            {"source": name, "title": m["title"], "url": m["url"]}
+            for m in res
+        ]
+    except:
+        return []
+
+
+# ==========================================================
+# RESULTADOS PAGINADOS
+# ==========================================================
+
+async def show_results(message, user_id, page):
+
+    data = SEARCH_CACHE[message.message_id]
+    total_pages = math.ceil(len(data) / RESULTS_PER_PAGE)
 
     start = page * RESULTS_PER_PAGE
     end = start + RESULTS_PER_PAGE
 
     buttons = []
 
-    for i, item in enumerate(cache[start:end], start=start):
+    for i, item in enumerate(data[start:end], start=start):
         buttons.append([
             InlineKeyboardButton(
                 f"{item['title']} ({item['source']})",
@@ -126,20 +160,18 @@ async def show_results(message, user_id, page=0):
         buttons.append(nav)
 
     await message.edit_text(
-        f"📚 Resultados (Página {page+1}/{total_pages})",
+        f"📚 Resultados ({page+1}/{total_pages})",
         reply_markup=InlineKeyboardMarkup(buttons)
     )
 
 
 # ==========================================================
-# MOSTRAR CAPÍTULOS
+# CAPÍTULOS PAGINADOS
 # ==========================================================
 
-async def show_chapters_page(query, page):
+async def show_chapters(message, context, page, user_id):
 
-    chapters = query._context.user_data.get("chapters")
-    user_id = query.from_user.id
-
+    chapters = context.user_data["chapters"]
     total_pages = math.ceil(len(chapters) / CHAPTERS_PER_PAGE)
 
     start = page * CHAPTERS_PER_PAGE
@@ -163,53 +195,20 @@ async def show_chapters_page(query, page):
     if page < total_pages - 1:
         nav.append(InlineKeyboardButton("»", callback_data=f"chap_page|{page+1}|{user_id}"))
 
-    if nav:
-        buttons.append(nav)
+    buttons.append(nav)
 
-    await query.message.edit_text(
-        f"📖 Capítulos (Página {page+1}/{total_pages})",
+    buttons.append([
+        InlineKeyboardButton("🔙 Voltar", callback_data=f"back|0|{user_id}")
+    ])
+
+    await message.edit_text(
+        f"📖 Capítulos ({page+1}/{total_pages})",
         reply_markup=InlineKeyboardMarkup(buttons)
     )
 
 
 # ==========================================================
-# BUSCAR
-# ==========================================================
-
-async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    query_text = " ".join(context.args)
-    if not query_text:
-        await update.message.reply_text("❌ Use /bb <nome>")
-        return
-
-    msg = await update.message.reply_text("🔎 Buscando em todas as fontes...")
-
-    cache = []
-
-    for source_name, source in get_all_sources().items():
-        try:
-            results = await source.search(query_text)
-            for manga in results:
-                cache.append({
-                    "source": source_name,
-                    "title": manga["title"],
-                    "url": manga["url"],
-                })
-        except Exception as e:
-            print(f"Erro na fonte {source_name}:", e)
-
-    if not cache:
-        await msg.edit_text("❌ Nenhum resultado encontrado.")
-        return
-
-    SEARCH_CACHE[msg.message_id] = cache
-
-    await show_results(msg, update.effective_user.id, page=0)
-
-
-# ==========================================================
-# HANDLERS
+# CALLBACKS
 # ==========================================================
 
 async def change_page(update, context):
@@ -236,11 +235,12 @@ async def select_manga(update, context):
 
     context.user_data["chapters"] = chapters
     context.user_data["source"] = source
+    context.user_data["title"] = data["title"]
 
     user_id = query.from_user.id
 
     buttons = [
-        [InlineKeyboardButton("📥 Baixar tudo", callback_data=f"download_all|{user_id}")],
+        [InlineKeyboardButton("📥 Baixar tudo", callback_data=f"download_all|0|{user_id}")],
         [InlineKeyboardButton("📖 Ver capítulos", callback_data=f"chap_page|0|{user_id}")]
     ]
 
@@ -256,10 +256,8 @@ async def download_all(update, context):
     if not is_owner(query):
         return
 
-    chapters = context.user_data.get("chapters")
-    source = context.user_data.get("source")
-
-    await query.message.reply_text(f"📥 {len(chapters)} capítulos na fila.")
+    chapters = context.user_data["chapters"]
+    source = context.user_data["source"]
 
     for chap in chapters:
         await DOWNLOAD_QUEUE.put({
@@ -267,6 +265,8 @@ async def download_all(update, context):
             "source": source,
             "chapter": chap
         })
+
+    await query.message.reply_text("📥 Todos capítulos adicionados na fila.")
 
 
 async def download_one(update, context):
@@ -276,10 +276,9 @@ async def download_one(update, context):
         return
 
     index = int(query.data.split("|")[1])
-    chapters = context.user_data.get("chapters")
-    source = context.user_data.get("source")
 
-    chap = chapters[index]
+    chap = context.user_data["chapters"][index]
+    source = context.user_data["source"]
 
     await DOWNLOAD_QUEUE.put({
         "message": query.message,
@@ -297,8 +296,16 @@ async def change_chap_page(update, context):
         return
 
     page = int(query.data.split("|")[1])
-    query._context = context
-    await show_chapters_page(query, page)
+    await show_chapters(query.message, context, page, query.from_user.id)
+
+
+async def back_to_results(update, context):
+    query = update.callback_query
+    await query.answer()
+    if not is_owner(query):
+        return
+
+    await show_results(query.message, query.from_user.id, 0)
 
 
 # ==========================================================
@@ -314,6 +321,7 @@ def main():
     app.add_handler(CallbackQueryHandler(download_all, pattern="^download_all"))
     app.add_handler(CallbackQueryHandler(download_one, pattern="^download_one"))
     app.add_handler(CallbackQueryHandler(change_chap_page, pattern="^chap_page"))
+    app.add_handler(CallbackQueryHandler(back_to_results, pattern="^back"))
 
     async def startup(app):
         asyncio.create_task(worker())
