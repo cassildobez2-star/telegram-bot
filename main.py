@@ -163,15 +163,17 @@ async def select_manga(update, context):
     query = update.callback_query
     await query.answer()
 
+    user_data = context.user_data
+
     chat_id = query.message.chat_id
     data = SEARCH_CACHE[chat_id][int(query.data.split("|")[1])]
     source = get_all_sources()[data["source"]]
 
     chapters = await source.chapters(data["url"])
 
-    context.chat_data["chapters"] = chapters
-    context.chat_data["source"] = source
-    context.chat_data["title"] = data["title"]
+    user_data["chapters"] = chapters
+    user_data["source"] = source
+    user_data["title"] = data["title"]
 
     buttons = [
         [InlineKeyboardButton("📥 Baixar tudo", callback_data="download_all")],
@@ -191,8 +193,9 @@ async def show_chapters(update, context):
     query = update.callback_query
     await query.answer()
 
+    user_data = context.user_data
     page = int(query.data.split("|")[1])
-    chapters = context.chat_data["chapters"]
+    chapters = user_data["chapters"]
 
     start = page * CHAPTERS_PER_PAGE
     end = start + CHAPTERS_PER_PAGE
@@ -240,8 +243,9 @@ async def back_to_menu(update, context):
     query = update.callback_query
     await query.answer()
 
-    title = context.chat_data["title"]
-    chapters = context.chat_data["chapters"]
+    user_data = context.user_data
+    title = user_data["title"]
+    chapters = user_data["chapters"]
 
     buttons = [
         [InlineKeyboardButton("📥 Baixar tudo", callback_data="download_all")],
@@ -261,8 +265,9 @@ async def download_all(update, context):
     query = update.callback_query
     await query.answer()
 
-    chapters = context.chat_data["chapters"]
-    source = context.chat_data["source"]
+    user_data = context.user_data
+    chapters = user_data["chapters"]
+    source = user_data["source"]
 
     for ch in chapters:
         await add_job({
@@ -279,9 +284,10 @@ async def download_one(update, context):
     query = update.callback_query
     await query.answer()
 
+    user_data = context.user_data
     index = int(query.data.split("|")[1])
-    chapters = context.chat_data["chapters"]
-    source = context.chat_data["source"]
+    chapters = user_data["chapters"]
+    source = user_data["source"]
 
     ch = chapters[index]
 
@@ -300,7 +306,9 @@ async def download_one(update, context):
 # ======================================================
 
 async def status(update, context):
-    await update.message.reply_text(f"📦 Fila atual: {queue_size()}")
+    await update.message.reply_text(
+        f"📦 Fila atual: {queue_size()}"
+    )
 
 # ======================================================
 # MAIN
