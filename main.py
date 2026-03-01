@@ -17,6 +17,10 @@ from utils.cbz import create_cbz
 
 logging.basicConfig(level=logging.INFO)
 
+# ==========================================================
+# CONFIG
+# ==========================================================
+
 DOWNLOAD_QUEUE = asyncio.Queue()
 DOWNLOAD_SEMAPHORE = asyncio.Semaphore(2)
 
@@ -40,10 +44,12 @@ def is_owner(query):
 
 
 # ==========================================================
-# FILA
+# WORKER DE DOWNLOAD
 # ==========================================================
 
 async def worker():
+    print("✅ Worker iniciado")
+
     while True:
         job = await DOWNLOAD_QUEUE.get()
 
@@ -56,7 +62,7 @@ async def worker():
         except Exception as e:
             print("Erro Worker:", e)
 
-        await asyncio.sleep(2)
+        await asyncio.sleep(1)
         DOWNLOAD_QUEUE.task_done()
 
 
@@ -67,7 +73,7 @@ async def send_chapter(message, source, chapter):
         try:
             imgs = await asyncio.wait_for(
                 source.pages(chapter["url"]),
-                timeout=40
+                timeout=60
             )
         except:
             await message.reply_text("❌ Erro ao obter páginas.")
@@ -103,7 +109,7 @@ async def send_chapter(message, source, chapter):
 
 
 # ==========================================================
-# BUSCAR
+# BUSCAR MANGÁ
 # ==========================================================
 
 async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -187,7 +193,7 @@ async def select_manga(update, context):
         [
             InlineKeyboardButton(
                 "📖 Ver capítulos",
-                callback_data=f"chapters|0|{user_id}"
+                callback_data=f"chapters|{user_id}"
             )
         ],
     ]
@@ -199,6 +205,100 @@ async def select_manga(update, context):
 
 
 # ==========================================================
+# DOWNLOAD ALL
+# ==========================================================
+
+async def download_all(update, context):
+    query = update.callback_query
+    await query.answer()
+
+    if not is_owner(query):
+        return
+
+    chapters = context.user_data.get("chapters")
+    source = context.user_data.get("source")
+
+    if not chapters:
+        return
+
+    await query.message.reply_text(
+        f"📥 {len(chapters)} capítulos adicionados na fila."
+    )
+
+    for chap in chapters:
+        await DOWNLOAD_QUEUE.put({
+            "message": query.message,
+            "source": source,
+            "chapter": chap
+        })
+
+
+# ==========================================================
+# VER CAPÍTULOS
+# ==========================================================
+
+async def show_chapters(update, context):
+    query = update.callback_query
+    await query.answer()
+
+    if not is_owner(query):
+        return
+
+    chapters = context.user_data.get("chapters")
+
+    if not chapters:
+        return
+
+    user_id = query.from_user.id
+
+    buttons = []
+
+    for i, chap in enumerate(chapters[:20]):
+        buttons.append([
+            InlineKeyboardButton(
+                f"Cap {chap.get('chapter_number')}",
+                callback_data=f"download_one|{i}|{user_id}"
+            )
+        ])
+
+    await query.message.reply_text(
+        "📖 Escolha um capítulo:",
+        reply_markup=InlineKeyboardMarkup(buttons),
+    )
+
+
+# ==========================================================
+# DOWNLOAD ONE
+# ==========================================================
+
+async def download_one(update, context):
+    query = update.callback_query
+    await query.answer()
+
+    if not is_owner(query):
+        return
+
+    parts = query.data.split("|")
+    index = int(parts[1])
+
+    chapters = context.user_data.get("chapters")
+    source = context.user_data.get("source")
+
+    if not chapters:
+        return
+
+    chap = chapters[index]
+
+    await DOWNLOAD_QUEUE.put({
+        "message": query.message,
+        "source": source,
+        "chapter": chap
+    })
+
+    await query.message.reply_text("📥 Capítulo adicionado na fila.")
+
+
+# ==========================================================
 # MAIN
 # ==========================================================
 
@@ -207,6 +307,9 @@ def main():
 
     app.add_handler(CommandHandler("bb", buscar))
     app.add_handler(CallbackQueryHandler(select_manga, pattern="^select"))
+    app.add_handler(CallbackQueryHandler(download_all, pattern="^download_all"))
+    app.add_handler(CallbackQueryHandler(show_chapters, pattern="^chapters"))
+    app.add_handler(CallbackQueryHandler(download_one, pattern="^download_one"))
 
     async def startup(app):
         asyncio.create_task(worker())
