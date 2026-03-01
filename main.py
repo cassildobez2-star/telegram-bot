@@ -17,40 +17,48 @@ from utils.cbz import create_cbz
 
 logging.basicConfig(level=logging.INFO)
 
-# ======================================================
-# CONFIG
-# ======================================================
-
 DOWNLOAD_QUEUE = asyncio.Queue()
 DOWNLOAD_SEMAPHORE = asyncio.Semaphore(2)
-CHAPTERS_PER_PAGE = 10
 
 SEARCH_CACHE = {}
-MESSAGE_OWNERS = {}
 
-# ======================================================
-# FILA
-# ======================================================
-
-async def add_job(job):
-    await DOWNLOAD_QUEUE.put(job)
-
-def queue_size():
-    return DOWNLOAD_QUEUE.qsize()
-
-# ======================================================
-# VERIFICAR DONO
-# ======================================================
+# ==========================================================
+# VERIFICAR DONO PELO CALLBACK_DATA
+# ==========================================================
 
 def is_owner(query):
-    message_id = query.message.message_id
-    user_id = query.from_user.id
-    owner_id = MESSAGE_OWNERS.get(message_id)
-    return owner_id == user_id
+    parts = query.data.split("|")
+    if len(parts) < 2:
+        return False
 
-# ======================================================
-# ENVIO CAPÍTULO
-# ======================================================
+    try:
+        owner_id = int(parts[-1])
+    except:
+        return False
+
+    return query.from_user.id == owner_id
+
+
+# ==========================================================
+# FILA
+# ==========================================================
+
+async def worker():
+    while True:
+        job = await DOWNLOAD_QUEUE.get()
+
+        try:
+            await send_chapter(
+                job["message"],
+                job["source"],
+                job["chapter"],
+            )
+        except Exception as e:
+            print("Erro Worker:", e)
+
+        await asyncio.sleep(2)
+        DOWNLOAD_QUEUE.task_done()
+
 
 async def send_chapter(message, source, chapter):
 
@@ -93,31 +101,10 @@ async def send_chapter(message, source, chapter):
 
         cbz_buffer.close()
 
-# ======================================================
-# WORKER
-# ======================================================
 
-async def worker():
-    print("✅ Worker iniciado")
-
-    while True:
-        job = await DOWNLOAD_QUEUE.get()
-
-        try:
-            await send_chapter(
-                job["message"],
-                job["source"],
-                job["chapter"],
-            )
-        except Exception as e:
-            print("Erro Worker:", e)
-
-        await asyncio.sleep(2)
-        DOWNLOAD_QUEUE.task_done()
-
-# ======================================================
-# BUSCAR – TODAS AS FONTES
-# ======================================================
+# ==========================================================
+# BUSCAR
+# ==========================================================
 
 async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
@@ -135,7 +122,6 @@ async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             results = await source.search(query_text)
 
-            # 🔥 AGORA PEGA TODOS RESULTADOS DA FONTE
             for manga in results:
                 cache.append({
                     "source": source_name,
@@ -146,7 +132,7 @@ async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 buttons.append([
                     InlineKeyboardButton(
                         f"{manga['title']} ({source_name})",
-                        callback_data=f"select|{len(cache)-1}",
+                        callback_data=f"select|{len(cache)-1}|{update.effective_user.id}",
                     )
                 ])
 
@@ -158,49 +144,63 @@ async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     SEARCH_CACHE[msg.message_id] = cache
-    MESSAGE_OWNERS[msg.message_id] = update.effective_user.id
 
     await msg.edit_text(
         "📚 Escolha o mangá:",
         reply_markup=InlineKeyboardMarkup(buttons),
     )
 
-# ======================================================
+
+# ==========================================================
 # SELECIONAR MANGÁ
-# ======================================================
+# ==========================================================
 
 async def select_manga(update, context):
     query = update.callback_query
     await query.answer()
 
     if not is_owner(query):
-        return  # 🔥 IGNORA SE NÃO FOR O DONO
+        return
+
+    parts = query.data.split("|")
+    index = int(parts[1])
 
     message_id = query.message.message_id
-    data = SEARCH_CACHE[message_id][int(query.data.split("|")[1])]
-    source = get_all_sources()[data["source"]]
+    data = SEARCH_CACHE[message_id][index]
 
+    source = get_all_sources()[data["source"]]
     chapters = await source.chapters(data["url"])
 
     context.user_data["chapters"] = chapters
     context.user_data["source"] = source
     context.user_data["title"] = data["title"]
 
+    user_id = query.from_user.id
+
     buttons = [
-        [InlineKeyboardButton("📥 Baixar tudo", callback_data="download_all")],
-        [InlineKeyboardButton("📖 Ver capítulos", callback_data="chapters|0")],
+        [
+            InlineKeyboardButton(
+                "📥 Baixar tudo",
+                callback_data=f"download_all|{user_id}"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "📖 Ver capítulos",
+                callback_data=f"chapters|0|{user_id}"
+            )
+        ],
     ]
 
-    msg = await query.message.reply_text(
+    await query.message.reply_text(
         f"📖 {data['title']}\n\nTotal: {len(chapters)} capítulos",
         reply_markup=InlineKeyboardMarkup(buttons),
     )
 
-    MESSAGE_OWNERS[msg.message_id] = query.from_user.id
 
-# ======================================================
+# ==========================================================
 # MAIN
-# ======================================================
+# ==========================================================
 
 def main():
     app = ApplicationBuilder().token(os.getenv("BOT_TOKEN")).build()
@@ -215,6 +215,7 @@ def main():
 
     print("🤖 Bot iniciado")
     app.run_polling(drop_pending_updates=True)
+
 
 if __name__ == "__main__":
     main()
